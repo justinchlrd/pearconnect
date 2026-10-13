@@ -1,7 +1,15 @@
 import prompt from 'custom-electron-prompt';
-import { dialog, shell, type MenuItemConstructorOptions } from 'electron';
+import {
+  clipboard,
+  dialog,
+  shell,
+  type MenuItemConstructorOptions,
+} from 'electron';
 
 import promptOptions from '@/providers/prompt-options';
+
+import { backend } from './backend';
+import { PLUGIN_VERSION } from './version';
 
 import type { PearConnectConfig } from './config';
 import type { MenuContext } from '@/types/contexts';
@@ -18,6 +26,48 @@ const ask = async (
     window,
   );
 
+/** Libellé de la ligne « Version » : installée, et mise à jour disponible le cas échéant. */
+const versionLabel = () => {
+  const base = `Version : v${PLUGIN_VERSION}`;
+  if (backend.update) return `${base} — mise à jour v${backend.update.latest} disponible`;
+  if (backend.update === null) return `${base} (à jour)`;
+  return base;
+};
+
+/** Vérifie maintenant et affiche le résultat (commande d'installation copiable). */
+const checkNow = async (window: MenuContext<PearConnectConfig>['window']) => {
+  const update = await backend.checkUpdate();
+  if (backend.updateError && !update) {
+    await dialog.showMessageBox(window, {
+      type: 'warning',
+      title: 'Pear Connect',
+      message: 'Impossible de vérifier les mises à jour',
+      detail: `Plugin installé : v${PLUGIN_VERSION}\n${backend.updateError}`,
+    });
+    return;
+  }
+  if (!update) {
+    await dialog.showMessageBox(window, {
+      type: 'info',
+      title: 'Pear Connect',
+      message: `Pear Connect v${PLUGIN_VERSION} est à jour.`,
+    });
+    return;
+  }
+  const { response } = await dialog.showMessageBox(window, {
+    type: 'info',
+    title: 'Pear Connect',
+    message: `Mise à jour v${update.latest} disponible (installée : v${update.current})`,
+    detail: update.command
+      ? `Dans ${process.platform === 'win32' ? 'PowerShell' : 'un terminal'}, Pear ouvert :\n\n${update.command}\n\nLe script remplace app.asar, garde le nom et le jeton de cet ordinateur et relance Pear.`
+      : 'Relance l’installation depuis le serveur Connect.',
+    buttons: update.command ? ['Copier la commande', 'Fermer'] : ['Fermer'],
+    defaultId: 0,
+    cancelId: update.command ? 1 : 0,
+  });
+  if (update.command && response === 0) clipboard.writeText(update.command);
+};
+
 export const onMenu = async ({
   getConfig,
   setConfig,
@@ -27,6 +77,19 @@ export const onMenu = async ({
   const masked = config.token ? '•••• (enregistré)' : 'à renseigner';
 
   return [
+    {
+      label: versionLabel(),
+      submenu: [
+        {
+          label: 'Rechercher une mise à jour…',
+          enabled: !!config.server && !!config.token,
+          async click() {
+            await checkNow(window);
+          },
+        },
+      ],
+    },
+    { type: 'separator' },
     {
       label: `Serveur : ${config.server || 'à renseigner'}`,
       async click() {
@@ -67,7 +130,7 @@ export const onMenu = async ({
       },
     },
     {
-      label: `Autorité de certification : ${config.caPath || 'magasin de Windows'}`,
+      label: `Autorité de certification : ${config.caPath || 'magasin du système'}`,
       submenu: [
         {
           label: 'Choisir le fichier (.crt, .pem)…',
@@ -84,7 +147,7 @@ export const onMenu = async ({
           },
         },
         {
-          label: 'Utiliser le magasin de Windows',
+          label: 'Utiliser le magasin du système',
           click: () => setConfig({ caPath: '' }),
         },
       ],

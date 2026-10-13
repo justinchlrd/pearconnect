@@ -73,6 +73,7 @@ DIST_FILES = {
     "uninstall.ps1": "text/plain; charset=utf-8",
     "install.sh": "text/plain; charset=utf-8",
     "uninstall.sh": "text/plain; charset=utf-8",
+    "versions.json": "application/json",  # versions publiées : les clients s'en servent pour signaler une mise à jour
     "app-asar.zip": "application/zip",
     "pearconnect-ca.crt": "application/x-x509-ca-cert",
     "PearConnect.apk": "application/vnd.android.package-archive",
@@ -431,7 +432,7 @@ def make_handler(hub: Hub) -> type[BaseHTTPRequestHandler]:
             if path == "/healthz":
                 return self._send(HTTPStatus.OK, {"ok": True})
             name = path[4:] if path.startswith("/dl/") else path[1:]
-            if name in DIST_FILES and (path.startswith("/dl/") or name.endswith((".ps1", ".sh"))):
+            if name in DIST_FILES and (path.startswith("/dl/") or name.endswith((".ps1", ".sh", ".json"))):
                 try:
                     data = (DIST_DIR / name).read_bytes()
                 except OSError:

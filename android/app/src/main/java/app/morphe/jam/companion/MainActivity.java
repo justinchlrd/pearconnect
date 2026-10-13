@@ -201,7 +201,40 @@ public final class MainActivity extends Activity {
         button(root, "Ne pas restreindre la batterie (connexion permanente)", v -> requestBattery());
         button(root, "Ouvrir la télécommande web", v ->
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(prefs.server()))));
+        button(root, "Rechercher une mise à jour (version " + BuildConfig.VERSION_NAME + ")", v -> checkUpdate());
         setContentView(scroll);
+    }
+
+    /** Compare la version de l'appli à versions.json du serveur et propose l'APK s'il est plus récent. */
+    private void checkUpdate() {
+        if (!JamService.agentRunning()) {
+            Toast.makeText(this, "Démarre d'abord l'agent (Enregistrer et démarrer)", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Toast.makeText(this, "Vérification…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            org.json.JSONObject update = JamService.checkUpdateNow();
+            Agent.Status s = JamService.currentStatus();
+            runOnUiThread(() -> {
+                if (update == null) {
+                    String server = s != null ? s.server : "";
+                    Toast.makeText(this, "connecté".equals(server)
+                        ? "Pear Connect " + BuildConfig.VERSION_NAME + " est à jour"
+                        : "Vérification impossible : serveur " + server, Toast.LENGTH_LONG).show();
+                    return;
+                }
+                String name = update.optString("version_name");
+                String url = update.optString("url");
+                new AlertDialog.Builder(this)
+                    .setTitle("Pear Connect " + name + " disponible")
+                    .setMessage("Installée : " + BuildConfig.VERSION_NAME + ".\nL'APK s'installe par-dessus (même signature), "
+                        + "les réglages sont conservés.")
+                    .setPositiveButton("Télécharger", (d, w) ->
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))))
+                    .setNegativeButton("Plus tard", null)
+                    .show();
+            });
+        }, "pearconnect-maj").start();
     }
 
     @android.annotation.SuppressLint("BatteryLife") // appli personnelle, hors Play Store
@@ -239,6 +272,12 @@ public final class MainActivity extends Activity {
 
     private void renderStatus() {
         StringBuilder b = new StringBuilder();
+        b.append("Version ").append(BuildConfig.VERSION_NAME);
+        Agent.Status st = JamService.currentStatus();
+        if (st != null && !st.updateName.isEmpty()) {
+            b.append(" — mise à jour ").append(st.updateName).append(" disponible");
+        }
+        b.append('\n');
         b.append(prefs.paired()
             ? "✔ Appairé avec " + prefs.musicPackage()
             : "✘ Pas encore appairé avec YouTube Music (voir plus bas)");

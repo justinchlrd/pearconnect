@@ -1,23 +1,277 @@
-From b117a61c9c074cd8762a9c72756a7a94eb9604c3 Mon Sep 17 00:00:00 2001
+From 8084d91cf6370042debb71ccd469f1517af99f07 Mon Sep 17 00:00:00 2001
 From: Bridouche <bluenderbot@gmail.com>
 Date: Tue, 13 Oct 2026 11:27:54 +0200
 Subject: [PATCH 4/4] =?UTF-8?q?feat(pear-connect):=20=C3=A9dition=20=C3=A0?=
  =?UTF-8?q?=20distance=20de=20=C2=AB=20=C3=A0=20suivre=20=C2=BB=20(remove/?=
- =?UTF-8?q?move)?=
+ =?UTF-8?q?move),=20version=20et=20mise=20=C3=A0=20jour?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-Commandes remove/move du serveur Connect exécutées via REMOVE_ITEM / MOVE_ITEM du store de la
-file ; boutons monter/descendre/retirer dans le panneau « À suivre » de l'appareil actif ;
-fonctions pures locateUpcoming/upcomingTarget (rang dans « à suivre », doublons, bornes).
+- commandes remove/move du serveur Connect exécutées via REMOVE_ITEM / MOVE_ITEM ; boutons
+  monter/descendre/retirer dans le panneau « À suivre » ; locateUpcoming/upcomingTarget
+- version du plugin (version.ts) affichée en tête du menu ; vérification de versions.json du
+  serveur au démarrage puis toutes les 6 h ; « Rechercher une mise à jour… » avec commande copiable
 ---
- src/plugins/pear-connect/protocol.ts |  39 +++++++++
- src/plugins/pear-connect/renderer.ts | 115 ++++++++++++++++++++++-----
- 2 files changed, 133 insertions(+), 21 deletions(-)
+ src/plugins/pear-connect/backend.ts  |  53 ++++++++++-
+ src/plugins/pear-connect/client.ts   |  12 ++-
+ src/plugins/pear-connect/menu.ts     |  69 +++++++++++++-
+ src/plugins/pear-connect/protocol.ts |  89 ++++++++++++++++++
+ src/plugins/pear-connect/renderer.ts | 132 ++++++++++++++++++++++-----
+ src/plugins/pear-connect/version.ts  |   6 ++
+ 6 files changed, 334 insertions(+), 27 deletions(-)
+ create mode 100644 src/plugins/pear-connect/version.ts
 
+diff --git a/src/plugins/pear-connect/backend.ts b/src/plugins/pear-connect/backend.ts
+index 8565159..5cd8743 100644
+--- a/src/plugins/pear-connect/backend.ts
++++ b/src/plugins/pear-connect/backend.ts
+@@ -20,9 +20,12 @@ import {
+   type PlaybackState,
+   type Snapshot,
+   type UiAction,
++  type UpdateInfo,
+   cleanPlaylistId,
++  pluginUpdate,
+   stateChanged,
+ } from './protocol';
++import { PLUGIN_VERSION } from './version';
+ 
+ import type { PearConnectConfig } from './config';
+ import type { BackendContext } from '@/types/contexts';
+@@ -45,6 +48,8 @@ export interface LocalReport {
+ const PUBLISH_EVERY = 2_000;
+ const HEARTBEAT = 15_000;
+ const LONG_POLL = 20;
++const UPDATE_FIRST_CHECK = 15_000;
++const UPDATE_EVERY = 6 * 3600_000;
+ const LOG = '[Pear Connect]';
+ 
+ /** Journal %APPDATA%\\YouTube Music\\pear-connect.log (1 Mo, une rotation). */
+@@ -84,12 +89,18 @@ type Props = {
+   snapshot?: Snapshot;
+   status: string;
+   callbackRegistered: boolean;
++  /** Mise à jour du plugin disponible (null : à jour ; undefined : pas encore vérifié). */
++  update?: UpdateInfo | null;
++  updateCheckedAt: number;
++  updateError?: string;
+   run(config: PearConnectConfig): void;
+   halt(): void;
+   currentState(): PlaybackState | null;
+   publishLoop(signal: AbortSignal): Promise<void>;
+   commandLoop(signal: AbortSignal): Promise<void>;
+   eventsLoop(signal: AbortSignal): Promise<void>;
++  updateLoop(signal: AbortSignal): Promise<void>;
++  checkUpdate(): Promise<UpdateInfo | null>;
+   execute(cmd: Command): void;
+   action(action: UiAction): Promise<ActionResult>;
+   pushSnapshot(): void;
+@@ -102,6 +113,7 @@ export const backend = createBackend<Props, PearConnectConfig>({
+   publishedAt: 0,
+   status: 'désactivé',
+   callbackRegistered: false,
++  updateCheckedAt: 0,
+ 
+   async start(ctx) {
+     this.ctx = ctx;
+@@ -158,8 +170,45 @@ export const backend = createBackend<Props, PearConnectConfig>({
+     this.publishLoop(abort.signal);
+     this.commandLoop(abort.signal);
+     this.eventsLoop(abort.signal);
++    this.updateLoop(abort.signal);
+     console.log(LOG, `appareil « ${config.device} » sur ${config.server}`);
+-    journal(`démarrage : appareil « ${config.device} » sur ${config.server}`);
++    journal(
++      `démarrage : plugin v${PLUGIN_VERSION}, appareil « ${config.device} » sur ${config.server}`,
++    );
++  },
++
++  async updateLoop(signal) {
++    await sleep(UPDATE_FIRST_CHECK, signal);
++    while (!signal.aborted) {
++      await this.checkUpdate();
++      await sleep(UPDATE_EVERY, signal);
++    }
++  },
++
++  /** Compare la version du plugin à `versions.json` du serveur ; signale la page et le menu. */
++  async checkUpdate() {
++    const client = this.client;
++    if (!client) return null;
++    try {
++      const info = await client.versions();
++      const update = pluginUpdate(info, PLUGIN_VERSION, process.platform);
++      const changed = update?.latest !== this.update?.latest;
++      this.update = update;
++      this.updateError = undefined;
++      this.updateCheckedAt = Date.now();
++      if (changed) {
++        journal(
++          update
++            ? `mise à jour disponible : v${update.latest} (installée : v${PLUGIN_VERSION})`
++            : `plugin v${PLUGIN_VERSION} à jour`,
++        );
++        this.pushSnapshot();
++      }
++      return update;
++    } catch (e) {
++      this.updateError = (e as Error).message;
++      return null;
++    }
+   },
+ 
+   halt() {
+@@ -290,6 +339,8 @@ export const backend = createBackend<Props, PearConnectConfig>({
+       snapshot: this.snapshot ?? null,
+       self: this.config?.device ?? '',
+       status: this.status,
++      version: PLUGIN_VERSION,
++      update: this.update ?? null,
+     });
+   },
+ 
+diff --git a/src/plugins/pear-connect/client.ts b/src/plugins/pear-connect/client.ts
+index 29907e0..1ca3664 100644
+--- a/src/plugins/pear-connect/client.ts
++++ b/src/plugins/pear-connect/client.ts
+@@ -7,7 +7,12 @@ import { readFileSync } from 'node:fs';
+ import { request as httpRequest, type IncomingMessage } from 'node:http';
+ import { request as httpsRequest } from 'node:https';
+ 
+-import type { Command, PlaybackState, Snapshot } from './protocol';
++import type {
++  Command,
++  PlaybackState,
++  Snapshot,
++  VersionsInfo,
++} from './protocol';
+ 
+ export class ConnectError extends Error {
+   constructor(
+@@ -165,6 +170,11 @@ export class ConnectClient {
+     return this.request<Snapshot>('GET', '/v1/snapshot');
+   }
+ 
++  /** Versions publiées (fichier public du serveur, voir build_dist.py). */
++  versions() {
++    return this.request<VersionsInfo | null>('GET', '/versions.json');
++  }
++
+   transfer(target: string) {
+     return this.request('POST', '/v1/transfer', { target });
+   }
+diff --git a/src/plugins/pear-connect/menu.ts b/src/plugins/pear-connect/menu.ts
+index 8d4d46a..63f9de6 100644
+--- a/src/plugins/pear-connect/menu.ts
++++ b/src/plugins/pear-connect/menu.ts
+@@ -1,8 +1,16 @@
+ import prompt from 'custom-electron-prompt';
+-import { dialog, shell, type MenuItemConstructorOptions } from 'electron';
++import {
++  clipboard,
++  dialog,
++  shell,
++  type MenuItemConstructorOptions,
++} from 'electron';
+ 
+ import promptOptions from '@/providers/prompt-options';
+ 
++import { backend } from './backend';
++import { PLUGIN_VERSION } from './version';
++
+ import type { PearConnectConfig } from './config';
+ import type { MenuContext } from '@/types/contexts';
+ 
+@@ -18,6 +26,48 @@ const ask = async (
+     window,
+   );
+ 
++/** Libellé de la ligne « Version » : installée, et mise à jour disponible le cas échéant. */
++const versionLabel = () => {
++  const base = `Version : v${PLUGIN_VERSION}`;
++  if (backend.update) return `${base} — mise à jour v${backend.update.latest} disponible`;
++  if (backend.update === null) return `${base} (à jour)`;
++  return base;
++};
++
++/** Vérifie maintenant et affiche le résultat (commande d'installation copiable). */
++const checkNow = async (window: MenuContext<PearConnectConfig>['window']) => {
++  const update = await backend.checkUpdate();
++  if (backend.updateError && !update) {
++    await dialog.showMessageBox(window, {
++      type: 'warning',
++      title: 'Pear Connect',
++      message: 'Impossible de vérifier les mises à jour',
++      detail: `Plugin installé : v${PLUGIN_VERSION}\n${backend.updateError}`,
++    });
++    return;
++  }
++  if (!update) {
++    await dialog.showMessageBox(window, {
++      type: 'info',
++      title: 'Pear Connect',
++      message: `Pear Connect v${PLUGIN_VERSION} est à jour.`,
++    });
++    return;
++  }
++  const { response } = await dialog.showMessageBox(window, {
++    type: 'info',
++    title: 'Pear Connect',
++    message: `Mise à jour v${update.latest} disponible (installée : v${update.current})`,
++    detail: update.command
++      ? `Dans ${process.platform === 'win32' ? 'PowerShell' : 'un terminal'}, Pear ouvert :\n\n${update.command}\n\nLe script remplace app.asar, garde le nom et le jeton de cet ordinateur et relance Pear.`
++      : 'Relance l’installation depuis le serveur Connect.',
++    buttons: update.command ? ['Copier la commande', 'Fermer'] : ['Fermer'],
++    defaultId: 0,
++    cancelId: update.command ? 1 : 0,
++  });
++  if (update.command && response === 0) clipboard.writeText(update.command);
++};
++
+ export const onMenu = async ({
+   getConfig,
+   setConfig,
+@@ -27,6 +77,19 @@ export const onMenu = async ({
+   const masked = config.token ? '•••• (enregistré)' : 'à renseigner';
+ 
+   return [
++    {
++      label: versionLabel(),
++      submenu: [
++        {
++          label: 'Rechercher une mise à jour…',
++          enabled: !!config.server && !!config.token,
++          async click() {
++            await checkNow(window);
++          },
++        },
++      ],
++    },
++    { type: 'separator' },
+     {
+       label: `Serveur : ${config.server || 'à renseigner'}`,
+       async click() {
+@@ -67,7 +130,7 @@ export const onMenu = async ({
+       },
+     },
+     {
+-      label: `Autorité de certification : ${config.caPath || 'magasin de Windows'}`,
++      label: `Autorité de certification : ${config.caPath || 'magasin du système'}`,
+       submenu: [
+         {
+           label: 'Choisir le fichier (.crt, .pem)…',
+@@ -84,7 +147,7 @@ export const onMenu = async ({
+           },
+         },
+         {
+-          label: 'Utiliser le magasin de Windows',
++          label: 'Utiliser le magasin du système',
+           click: () => setConfig({ caPath: '' }),
+         },
+       ],
 diff --git a/src/plugins/pear-connect/protocol.ts b/src/plugins/pear-connect/protocol.ts
-index f8855e5..c4afad9 100644
+index f8855e5..b14253c 100644
 --- a/src/plugins/pear-connect/protocol.ts
 +++ b/src/plugins/pear-connect/protocol.ts
 @@ -49,6 +49,10 @@ export type Command =
@@ -40,7 +294,64 @@ index f8855e5..c4afad9 100644
      };
  
  export interface ActionResult {
-@@ -210,3 +216,36 @@ export const indexOfVideo = (
+@@ -80,6 +86,56 @@ export interface LocalExtras {
+   volume: number | null;
+ }
+ 
++/** Fichier public `versions.json` du serveur : versions publiées (généré par build_dist.py). */
++export interface VersionsInfo {
++  pear?: string;
++  plugin?: {
++    version?: string;
++    asar_sha256?: string;
++    install_windows?: string;
++    install_linux?: string;
++  };
++  android?: { version_code?: number; version_name?: string; url?: string };
++  published?: string;
++}
++
++/** Mise à jour du plugin signalée à la page et au menu. */
++export interface UpdateInfo {
++  current: string;
++  latest: string;
++  /** Commande d'installation pour cette plateforme (Windows : PowerShell, sinon bash). */
++  command: string;
++}
++
++/** Compare deux versions « 12 », « 12.1 », « 1.2.3 » segment par segment : `latest` est-elle plus récente ? */
++export const isNewerVersion = (latest: unknown, current: string): boolean => {
++  if (typeof latest !== 'string' || !/^\d+(\.\d+)*$/.test(latest.trim()))
++    return false;
++  const a = latest.trim().split('.').map(Number);
++  const b = current.trim().split('.').map(Number);
++  for (let i = 0; i < Math.max(a.length, b.length); i++) {
++    const x = a[i] ?? 0;
++    const y = b[i] ?? 0;
++    if (x !== y) return x > y;
++  }
++  return false;
++};
++
++/** `UpdateInfo` si `versions.json` annonce un plugin plus récent que `current`, sinon null. */
++export const pluginUpdate = (
++  info: VersionsInfo | null | undefined,
++  current: string,
++  platform: string,
++): UpdateInfo | null => {
++  const latest = info?.plugin?.version;
++  if (!isNewerVersion(latest, current)) return null;
++  const command =
++    (platform === 'win32'
++      ? info?.plugin?.install_windows
++      : info?.plugin?.install_linux) ?? '';
++  return { current, latest: latest as string, command };
++};
++
+ export const cleanPlaylistId = (value: unknown): string =>
+   typeof value === 'string' && PLAYLIST_ID_RE.test(value) ? value : '';
+ 
+@@ -210,3 +266,36 @@ export const indexOfVideo = (
    const any = after ?? entries.find((e) => e.video_id === videoId);
    return any ? any.index : null;
  };
@@ -78,10 +389,14 @@ index f8855e5..c4afad9 100644
 +  return Math.max(current + 1, Math.min(last, wanted));
 +};
 diff --git a/src/plugins/pear-connect/renderer.ts b/src/plugins/pear-connect/renderer.ts
-index 8348e28..77cfaf1 100644
+index 8348e28..b8e95ed 100644
 --- a/src/plugins/pear-connect/renderer.ts
 +++ b/src/plugins/pear-connect/renderer.ts
-@@ -19,8 +19,10 @@ import {
+@@ -16,11 +16,14 @@ import {
+   type DeviceView,
+   type Snapshot,
+   type UiAction,
++  type UpdateInfo,
    QUEUE_LIMIT,
    VIDEO_ID_RE,
    indexOfVideo,
@@ -92,7 +407,7 @@ index 8348e28..77cfaf1 100644
    watchEndpoint,
  } from './protocol';
  
-@@ -50,6 +52,10 @@ const ICONS = {
+@@ -50,6 +53,10 @@ const ICONS = {
      'M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z',
    speaker:
      'M17 2H7c-1.1 0-2 .9-2 2v16c0 1.1.9 1.99 2 1.99L17 22c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-5 2c1.1 0 2 .9 2 2s-.9 2-2 2a2 2 0 1 1 0-4zm0 16c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z',
@@ -103,7 +418,7 @@ index 8348e28..77cfaf1 100644
  } as const;
  type IconName = keyof typeof ICONS;
  const KIND_ICON: Record<string, IconName> = {
-@@ -109,8 +115,12 @@ input[type=range] { width: 96px; accent-color: ${ACCENT}; }
+@@ -109,8 +116,12 @@ input[type=range] { width: 96px; accent-color: ${ACCENT}; }
  .popvol input { flex: 1; width: auto; }
  .empty { margin: 8px; font-size: 13px; color: #aaa; }
  .qpop { right: 340px; width: 360px; }
@@ -118,7 +433,7 @@ index 8348e28..77cfaf1 100644
  .qart { width: 40px; height: 40px; flex: none; border-radius: 4px; background: #333 center / auto 134% no-repeat; }
  .qrow .name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
  .qrow .state { font-size: 12px; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-@@ -487,30 +497,77 @@ function createUi(send: (action: UiAction) => Promise<ActionResult>) {
+@@ -487,30 +498,77 @@ function createUi(send: (action: UiAction) => Promise<ActionResult>) {
        qlist.append(h('p', { class: 'empty', text: 'File vide (ou inconnue)' }));
        return;
      }
@@ -210,7 +525,36 @@ index 8348e28..77cfaf1 100644
    }
    function toggleQueue() {
      if (qpop.classList.contains('show')) return qpop.classList.remove('show');
-@@ -766,15 +823,31 @@ export const renderer = createRenderer<Props, PearConnectConfig>({
+@@ -625,13 +683,27 @@ function createUi(send: (action: UiAction) => Promise<ActionResult>) {
+     window.setInterval(attach, 1000),
+   ];
+ 
++  let announcedUpdate = '';
+   return {
+-    update(data: { snapshot: Snapshot | null; self: string; status: string }) {
++    update(data: {
++      snapshot: Snapshot | null;
++      self: string;
++      status: string;
++      version?: string;
++      update?: UpdateInfo | null;
++    }) {
+       snap = data.snapshot;
+       self = data.self;
+       status = data.status;
+       snapAt = performance.now();
+       render();
++      // une seule annonce par version proposée
++      if (data.update && data.update.latest !== announcedUpdate) {
++        announcedUpdate = data.update.latest;
++        toast(
++          `Pear Connect v${data.update.latest} disponible (installée : v${data.update.current}) : menu Plugins › Pear Connect`,
++        );
++      }
+     },
+     toast,
+     destroy() {
+@@ -766,15 +838,31 @@ export const renderer = createRenderer<Props, PearConnectConfig>({
        default:
          break;
      }
@@ -247,6 +591,18 @@ index 8348e28..77cfaf1 100644
      }
    },
  
+diff --git a/src/plugins/pear-connect/version.ts b/src/plugins/pear-connect/version.ts
+new file mode 100644
+index 0000000..eee065f
+--- /dev/null
++++ b/src/plugins/pear-connect/version.ts
+@@ -0,0 +1,6 @@
++/**
++ * Version du plugin Pear Connect (numéro de livraison : v11, v12…).
++ * À incrémenter à chaque publication ; `windows/build_dist.py` la lit pour `versions.json`,
++ * que le plugin compare à la sienne pour signaler une mise à jour.
++ */
++export const PLUGIN_VERSION = '12';
 -- 
 2.39.1.windows.1
 

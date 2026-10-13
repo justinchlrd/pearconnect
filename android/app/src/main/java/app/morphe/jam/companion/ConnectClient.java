@@ -148,6 +148,11 @@ final class ConnectClient {
         }
     }
 
+    /** Versions publiées par le serveur (fichier public versions.json, voir windows/build_dist.py). */
+    JSONObject versions() throws ConnectException {
+        return req("GET", "/versions.json", null, 15000);
+    }
+
     boolean healthy() {
         try {
             return req("GET", "/healthz", null, 8000).optBoolean("ok");

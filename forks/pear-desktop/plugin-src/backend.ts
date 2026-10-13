@@ -20,9 +20,12 @@ import {
   type PlaybackState,
   type Snapshot,
   type UiAction,
+  type UpdateInfo,
   cleanPlaylistId,
+  pluginUpdate,
   stateChanged,
 } from './protocol';
+import { PLUGIN_VERSION } from './version';
 
 import type { PearConnectConfig } from './config';
 import type { BackendContext } from '@/types/contexts';
@@ -45,6 +48,8 @@ export interface LocalReport {
 const PUBLISH_EVERY = 2_000;
 const HEARTBEAT = 15_000;
 const LONG_POLL = 20;
+const UPDATE_FIRST_CHECK = 15_000;
+const UPDATE_EVERY = 6 * 3600_000;
 const LOG = '[Pear Connect]';
 
 /** Journal %APPDATA%\\YouTube Music\\pear-connect.log (1 Mo, une rotation). */
@@ -84,12 +89,18 @@ type Props = {
   snapshot?: Snapshot;
   status: string;
   callbackRegistered: boolean;
+  /** Mise à jour du plugin disponible (null : à jour ; undefined : pas encore vérifié). */
+  update?: UpdateInfo | null;
+  updateCheckedAt: number;
+  updateError?: string;
   run(config: PearConnectConfig): void;
   halt(): void;
   currentState(): PlaybackState | null;
   publishLoop(signal: AbortSignal): Promise<void>;
   commandLoop(signal: AbortSignal): Promise<void>;
   eventsLoop(signal: AbortSignal): Promise<void>;
+  updateLoop(signal: AbortSignal): Promise<void>;
+  checkUpdate(): Promise<UpdateInfo | null>;
   execute(cmd: Command): void;
   action(action: UiAction): Promise<ActionResult>;
   pushSnapshot(): void;
@@ -102,6 +113,7 @@ export const backend = createBackend<Props, PearConnectConfig>({
   publishedAt: 0,
   status: 'désactivé',
   callbackRegistered: false,
+  updateCheckedAt: 0,
 
   async start(ctx) {
     this.ctx = ctx;
@@ -158,8 +170,45 @@ export const backend = createBackend<Props, PearConnectConfig>({
     this.publishLoop(abort.signal);
     this.commandLoop(abort.signal);
     this.eventsLoop(abort.signal);
+    this.updateLoop(abort.signal);
     console.log(LOG, `appareil « ${config.device} » sur ${config.server}`);
-    journal(`démarrage : appareil « ${config.device} » sur ${config.server}`);
+    journal(
+      `démarrage : plugin v${PLUGIN_VERSION}, appareil « ${config.device} » sur ${config.server}`,
+    );
+  },
+
+  async updateLoop(signal) {
+    await sleep(UPDATE_FIRST_CHECK, signal);
+    while (!signal.aborted) {
+      await this.checkUpdate();
+      await sleep(UPDATE_EVERY, signal);
+    }
+  },
+
+  /** Compare la version du plugin à `versions.json` du serveur ; signale la page et le menu. */
+  async checkUpdate() {
+    const client = this.client;
+    if (!client) return null;
+    try {
+      const info = await client.versions();
+      const update = pluginUpdate(info, PLUGIN_VERSION, process.platform);
+      const changed = update?.latest !== this.update?.latest;
+      this.update = update;
+      this.updateError = undefined;
+      this.updateCheckedAt = Date.now();
+      if (changed) {
+        journal(
+          update
+            ? `mise à jour disponible : v${update.latest} (installée : v${PLUGIN_VERSION})`
+            : `plugin v${PLUGIN_VERSION} à jour`,
+        );
+        this.pushSnapshot();
+      }
+      return update;
+    } catch (e) {
+      this.updateError = (e as Error).message;
+      return null;
+    }
   },
 
   halt() {
@@ -290,6 +339,8 @@ export const backend = createBackend<Props, PearConnectConfig>({
       snapshot: this.snapshot ?? null,
       self: this.config?.device ?? '',
       status: this.status,
+      version: PLUGIN_VERSION,
+      update: this.update ?? null,
     });
   },
 

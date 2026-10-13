@@ -34,6 +34,10 @@ final class Agent {
         volatile String activeTitle = "";
         volatile boolean activeIsMe;
         volatile boolean hasSession;
+        /** Mise à jour de l'appli disponible : nom de version et lien de l'APK (vides sinon). */
+        volatile String updateName = "";
+        volatile String updateUrl = "";
+        volatile long updateCheckedAt;
     }
 
     private static final String TAG = "PearConnect";
@@ -41,6 +45,7 @@ final class Agent {
     private static final long HEARTBEAT_MS = 15000;
     private static final long SNAPSHOT_EVERY_MS = 2000;
     private static final long RESUME_TIMEOUT_MS = 45000;
+    private static final long UPDATE_CHECK_EVERY_MS = 24L * 3600 * 1000;
     private static final int LONG_POLL_S = 20;
 
     /** Reprise lancée par ResumeActivity (geste utilisateur) : évite d'ouvrir deux fois le même titre. */
@@ -170,7 +175,29 @@ final class Agent {
             }
             readSession(snap);
         }
+        if (now - status.updateCheckedAt >= UPDATE_CHECK_EVERY_MS) checkUpdate(client);
         listener.onStatus(status);
+    }
+
+    /** Compare la version de l'appli à versions.json du serveur (une fois par jour, ou à la demande). */
+    JSONObject checkUpdate(ConnectClient client) {
+        status.updateCheckedAt = SystemClock.elapsedRealtime();
+        try {
+            JSONObject update = Mapping.updateInfo(client.versions(), BuildConfig.VERSION_CODE);
+            status.updateName = update != null ? update.optString("version_name") : "";
+            status.updateUrl = update != null ? update.optString("url") : "";
+            return update;
+        } catch (ConnectClient.ConnectException e) {
+            Log.w(TAG, "vérification de mise à jour impossible : " + e.getMessage());
+            return null;
+        }
+    }
+
+    /** Vérification manuelle (bouton de l'écran principal) ; hors du fil principal. */
+    JSONObject checkUpdateNow() {
+        JSONObject update = checkUpdate(client());
+        listener.onStatus(status);
+        return update;
     }
 
     private void readSession(JSONObject snap) {

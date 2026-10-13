@@ -461,6 +461,26 @@ final class Mapping {
         }
     }
 
+    /**
+     * Mise à jour de l'appli annoncée par versions.json : {"version_name", "version_code", "url"} si
+     * le serveur publie un versionCode supérieur à `currentCode`, sinon null.
+     */
+    static JSONObject updateInfo(JSONObject versions, int currentCode) {
+        JSONObject android = versions != null ? versions.optJSONObject("android") : null;
+        if (android == null) return null;
+        int code = android.optInt("version_code", -1);
+        String url = android.optString("url", "");
+        if (code <= currentCode || !url.startsWith("http")) return null;
+        try {
+            return new JSONObject()
+                .put("version_code", code)
+                .put("version_name", android.optString("version_name", String.valueOf(code)))
+                .put("url", url);
+        } catch (JSONException e) {
+            return null;
+        }
+    }
+
     static String clockVideo(JSONObject snapshot) {
         JSONObject clock = snapshot != null ? snapshot.optJSONObject("clock") : null;
         return clock != null ? clock.optString("videoId", "") : "";

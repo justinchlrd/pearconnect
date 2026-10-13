@@ -32,8 +32,11 @@ public final class JamService extends Service implements Agent.Listener {
     static final String ACTION_STOP = "app.pearconnect.companion.STOP";
     private static final String CHANNEL = "connect";
     private static final String CHANNEL_RESUME = "resume";
+    private static final String CHANNEL_UPDATE = "update";
     private static final int NOTIF_ID = 1;
     private static final int NOTIF_RESUME = 2;
+    private static final int NOTIF_UPDATE = 3;
+    private String announcedUpdate = "";
 
     private static volatile JamService instance;
 
@@ -45,6 +48,12 @@ public final class JamService extends Service implements Agent.Listener {
     static Agent.Status currentStatus() {
         JamService s = instance;
         return s != null && s.agent != null ? s.agent.status : null;
+    }
+
+    /** Vérification manuelle des mises à jour (hors du fil principal) ; null si l'agent ne tourne pas ou rien de neuf. */
+    static JSONObject checkUpdateNow() {
+        JamService s = instance;
+        return s != null && s.agent != null ? s.agent.checkUpdateNow() : null;
     }
 
     static boolean agentRunning() {
@@ -156,8 +165,28 @@ public final class JamService extends Service implements Agent.Listener {
         NotificationChannel resume = new NotificationChannel(CHANNEL_RESUME, "Reprise de la lecture",
             NotificationManager.IMPORTANCE_HIGH);
         resume.setDescription("Toucher pour reprendre ici une écoute transférée");
+        NotificationChannel update = new NotificationChannel(CHANNEL_UPDATE, "Mises à jour de Pear Connect",
+            NotificationManager.IMPORTANCE_DEFAULT);
+        update.setDescription("Une nouvelle version de l'appli est disponible sur le serveur Connect");
         nm.createNotificationChannel(main);
         nm.createNotificationChannel(resume);
+        nm.createNotificationChannel(update);
+    }
+
+    /** Une notification par version proposée ; toucher ouvre l'APK (installation par-dessus, même signature). */
+    private void announceUpdate(Agent.Status s) {
+        if (s.updateName.isEmpty() || s.updateUrl.isEmpty() || s.updateName.equals(announcedUpdate)) return;
+        announcedUpdate = s.updateName;
+        Intent open = new Intent(Intent.ACTION_VIEW, Uri.parse(s.updateUrl));
+        Notification n = new Notification.Builder(this, CHANNEL_UPDATE)
+            .setSmallIcon(R.drawable.ic_stat)
+            .setContentTitle("Pear Connect " + s.updateName + " disponible")
+            .setContentText("Installée : " + BuildConfig.VERSION_NAME + ". Toucher pour télécharger l'APK.")
+            .setAutoCancel(true)
+            .setCategory(Notification.CATEGORY_RECOMMENDATION)
+            .setContentIntent(activityIntent(open, 15))
+            .build();
+        getSystemService(NotificationManager.class).notify(NOTIF_UPDATE, n);
     }
 
     private PendingIntent activityIntent(Intent i, int code) {
@@ -199,6 +228,7 @@ public final class JamService extends Service implements Agent.Listener {
 
     @Override
     public void onStatus(Agent.Status status) {
+        announceUpdate(status);
         String key = status.server + status.bridge + status.activeDevice + status.activeTitle
             + status.activeIsMe + status.hasSession;
         if (key.equals(lastNotification)) return;

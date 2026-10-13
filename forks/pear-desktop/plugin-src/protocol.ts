@@ -86,6 +86,56 @@ export interface LocalExtras {
   volume: number | null;
 }
 
+/** Fichier public `versions.json` du serveur : versions publiées (généré par build_dist.py). */
+export interface VersionsInfo {
+  pear?: string;
+  plugin?: {
+    version?: string;
+    asar_sha256?: string;
+    install_windows?: string;
+    install_linux?: string;
+  };
+  android?: { version_code?: number; version_name?: string; url?: string };
+  published?: string;
+}
+
+/** Mise à jour du plugin signalée à la page et au menu. */
+export interface UpdateInfo {
+  current: string;
+  latest: string;
+  /** Commande d'installation pour cette plateforme (Windows : PowerShell, sinon bash). */
+  command: string;
+}
+
+/** Compare deux versions « 12 », « 12.1 », « 1.2.3 » segment par segment : `latest` est-elle plus récente ? */
+export const isNewerVersion = (latest: unknown, current: string): boolean => {
+  if (typeof latest !== 'string' || !/^\d+(\.\d+)*$/.test(latest.trim()))
+    return false;
+  const a = latest.trim().split('.').map(Number);
+  const b = current.trim().split('.').map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+};
+
+/** `UpdateInfo` si `versions.json` annonce un plugin plus récent que `current`, sinon null. */
+export const pluginUpdate = (
+  info: VersionsInfo | null | undefined,
+  current: string,
+  platform: string,
+): UpdateInfo | null => {
+  const latest = info?.plugin?.version;
+  if (!isNewerVersion(latest, current)) return null;
+  const command =
+    (platform === 'win32'
+      ? info?.plugin?.install_windows
+      : info?.plugin?.install_linux) ?? '';
+  return { current, latest: latest as string, command };
+};
+
 export const cleanPlaylistId = (value: unknown): string =>
   typeof value === 'string' && PLAYLIST_ID_RE.test(value) ? value : '';
 

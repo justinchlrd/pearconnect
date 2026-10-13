@@ -16,6 +16,7 @@ import {
   type DeviceView,
   type Snapshot,
   type UiAction,
+  type UpdateInfo,
   QUEUE_LIMIT,
   VIDEO_ID_RE,
   indexOfVideo,
@@ -682,13 +683,27 @@ function createUi(send: (action: UiAction) => Promise<ActionResult>) {
     window.setInterval(attach, 1000),
   ];
 
+  let announcedUpdate = '';
   return {
-    update(data: { snapshot: Snapshot | null; self: string; status: string }) {
+    update(data: {
+      snapshot: Snapshot | null;
+      self: string;
+      status: string;
+      version?: string;
+      update?: UpdateInfo | null;
+    }) {
       snap = data.snapshot;
       self = data.self;
       status = data.status;
       snapAt = performance.now();
       render();
+      // une seule annonce par version proposée
+      if (data.update && data.update.latest !== announcedUpdate) {
+        announcedUpdate = data.update.latest;
+        toast(
+          `Pear Connect v${data.update.latest} disponible (installée : v${data.update.current}) : menu Plugins › Pear Connect`,
+        );
+      }
     },
     toast,
     destroy() {

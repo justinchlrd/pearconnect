@@ -133,6 +133,7 @@ def main() -> None:
     ap.add_argument("--original", type=Path, default=default_original(), help="app.asar officiel 3.12.0")
     ap.add_argument("--skip-check", action="store_true", help="sans oxlint ni tsc")
     ap.add_argument("--dist", action="store_true", help="régénère aussi server/dist/ (installeur)")
+    ap.add_argument("--apk-version", help="<versionCode>:<versionName> de l'APK servi, s'il diffère des sources")
     args = ap.parse_args()
 
     repo = args.build / "pear-desktop"
@@ -168,7 +169,7 @@ def main() -> None:
         keep.mkdir(exist_ok=True)
         shutil.copy(ca, keep / ca.name)
         shutil.copy(apk, keep / apk.name)
-        build_dist.main(str(z), str(keep / ca.name), str(keep / apk.name))
+        build_dist.main(str(z), str(keep / ca.name), str(keep / apk.name), args.apk_version)
 
 
 if __name__ == "__main__":

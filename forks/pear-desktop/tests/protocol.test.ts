@@ -11,14 +11,17 @@ import {
   cleanPlaylistId,
   extrapolate,
   indexOfVideo,
+  isNewerVersion,
   locateUpcoming,
   parseQueue,
+  pluginUpdate,
   stateChanged,
   upcomingRows,
   upcomingTarget,
   watchEndpoint,
   type PlaybackState,
 } from '../plugin-src/protocol.ts';
+import { PLUGIN_VERSION } from '../plugin-src/version.ts';
 
 const ID = (c: string) => c.repeat(11);
 
@@ -183,6 +186,34 @@ describe('locateUpcoming', () => {
     assert.equal(locateUpcoming(entries, ID('a')), null);
     assert.equal(locateUpcoming(entries, ID('a'), -2), null);
     assert.equal(locateUpcoming(parseQueue([item(ID('b')), item(ID('a'), { selected: true })]), ID('b')), null);
+  });
+});
+
+describe('versions', () => {
+  it('compare segment par segment', () => {
+    assert.equal(isNewerVersion('13', '12'), true);
+    assert.equal(isNewerVersion('12', '12'), false);
+    assert.equal(isNewerVersion('11', '12'), false);
+    assert.equal(isNewerVersion('12.1', '12'), true);
+    assert.equal(isNewerVersion('12', '12.1'), false);
+    assert.equal(isNewerVersion('2.0', '12'), false);
+    assert.equal(isNewerVersion('v13', '12'), false, 'format inattendu : jamais de fausse alerte');
+    assert.equal(isNewerVersion(undefined, '12'), false);
+    assert.equal(isNewerVersion(13, '12'), false);
+  });
+  it('la version embarquée est un numéro valide', () => {
+    assert.match(PLUGIN_VERSION, /^\d+(\.\d+)*$/);
+  });
+  it('construit l’annonce de mise à jour selon la plateforme', () => {
+    const info = {
+      plugin: { version: '13', install_windows: 'irm X | iex', install_linux: 'curl X | bash' },
+    };
+    assert.deepEqual(pluginUpdate(info, '12', 'win32'), { current: '12', latest: '13', command: 'irm X | iex' });
+    assert.deepEqual(pluginUpdate(info, '12', 'linux'), { current: '12', latest: '13', command: 'curl X | bash' });
+    assert.equal(pluginUpdate(info, '13', 'win32'), null);
+    assert.equal(pluginUpdate(null, '12', 'win32'), null);
+    assert.equal(pluginUpdate({}, '12', 'win32'), null);
+    assert.equal(pluginUpdate({ plugin: { version: '14' } }, '12', 'linux')?.command, '');
   });
 });
 

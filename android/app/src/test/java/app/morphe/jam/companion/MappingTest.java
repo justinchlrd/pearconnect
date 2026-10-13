@@ -227,6 +227,22 @@ public class MappingTest {
     }
 
     @Test
+    public void updateOnlyWhenServerPublishesNewerCode() throws Exception {
+        JSONObject v = new JSONObject().put("android", new JSONObject()
+            .put("version_code", 10).put("version_name", "0.6.0").put("url", "http://192.168.1.168:8787/dl/PearConnect.apk"));
+        JSONObject u = Mapping.updateInfo(v, 9);
+        assertEquals("0.6.0", u.getString("version_name"));
+        assertEquals(10, u.getInt("version_code"));
+        assertTrue(u.getString("url").endsWith("PearConnect.apk"));
+        assertNull(Mapping.updateInfo(v, 10));
+        assertNull(Mapping.updateInfo(v, 11));
+        assertNull(Mapping.updateInfo(new JSONObject(), 9));
+        assertNull(Mapping.updateInfo(null, 9));
+        v.getJSONObject("android").put("url", "javascript:alert(1)");
+        assertNull("lien non http refusé", Mapping.updateInfo(v, 9));
+    }
+
+    @Test
     public void phoneQueueCarriesTitlesForOtherDevices() throws Exception {
         JSONObject s = Mapping.stateFromSnapshot(snapshot(true));
         JSONArray q = s.getJSONArray("queue");
