@@ -14,7 +14,7 @@ Documents de fond : `RECHERCHE_PLAYBACK.md`, `RECHERCHE_MULTI_APPAREILS.md`, `RE
 - **Téléphone** : Android, **YouTube Music Morphe**, paquet `app.morphe.android.apps.youtube.music`, avec le patch « Jam queue sharing » (Morphe patches ≥ 1.47). IP 192.168.1.17 en LAN, 192.168.27.65 en VPN.
 - **Scrobbling** Last.fm sur les trois (hors périmètre).
 - **Homelab** : Proxmox « the-nexus » 192.168.1.10. Accès : `ssh root@192.168.1.10` par clé depuis the_core (fonctionne aussi via le VPN) ; l'ancienne clé `claude_pearconnect` de la VM du pont d'appareils est **à révoquer** (voir tâches).
-- **Dépôt git** : `pearsync/` est un dépôt git depuis le 13/10 (fins de ligne LF forcées par `.gitattributes`). Le dossier de build (`../build/`, hors dépôt) contient le fork Pear et ses `node_modules`.
+- **Dépôt git** : `pearsync/` est un dépôt git depuis le 13/10 (fins de ligne LF forcées par `.gitattributes`), remote `origin` = `git@github.com:justinchlrd/pearconnect.git` (privé). `server/dist/` est **ignoré** (sorties de build : asar, installeurs, `versions.json`, APK), seul `pearconnect-ca.crt` y est suivi ; les versions publiées vont dans les Releases GitHub. Le dossier de build (`../build/`, hors dépôt) contient le fork Pear et ses `node_modules`.
 
 ## 2. Architecture actuelle
 
