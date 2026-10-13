@@ -66,11 +66,13 @@ VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 MAX_QUEUE_VIEW = 50
 ROUTE_RE = re.compile(r"^/v1/devices/([^/]+)/(state|commands|commands/take)$")
 WEB_UI = Path(__file__).with_name("web") / "index.html"
-# Installation en une commande (irm http://…/install.ps1 | iex) : fichiers publics, sans jeton
+# Installation en une commande (irm …/install.ps1 | iex, curl …/install.sh | bash) : fichiers publics, sans jeton
 DIST_DIR = Path(__file__).with_name("dist")
 DIST_FILES = {
     "install.ps1": "text/plain; charset=utf-8",
     "uninstall.ps1": "text/plain; charset=utf-8",
+    "install.sh": "text/plain; charset=utf-8",
+    "uninstall.sh": "text/plain; charset=utf-8",
     "app-asar.zip": "application/zip",
     "pearconnect-ca.crt": "application/x-x509-ca-cert",
     "PearConnect.apk": "application/vnd.android.package-archive",
@@ -429,7 +431,7 @@ def make_handler(hub: Hub) -> type[BaseHTTPRequestHandler]:
             if path == "/healthz":
                 return self._send(HTTPStatus.OK, {"ok": True})
             name = path[4:] if path.startswith("/dl/") else path[1:]
-            if name in DIST_FILES and (path.startswith("/dl/") or name.endswith(".ps1")):
+            if name in DIST_FILES and (path.startswith("/dl/") or name.endswith((".ps1", ".sh"))):
                 try:
                     data = (DIST_DIR / name).read_bytes()
                 except OSError:

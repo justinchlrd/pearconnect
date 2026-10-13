@@ -1,7 +1,7 @@
-From 84100f6f3dde3fc75663d390fc2d259eabad5b28 Mon Sep 17 00:00:00 2001
+From b74aa1abf3bedbdf5de79c55557805579e7ffed4 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 12 Oct 2026 22:16:02 +0200
-Subject: [PATCH 3/3] =?UTF-8?q?feat(pear-connect):=20file=20de=20l'apparei?=
+Subject: [PATCH 3/4] =?UTF-8?q?feat(pear-connect):=20file=20de=20l'apparei?=
  =?UTF-8?q?l=20actif,=20=C3=A9tat=20publi=C3=A9=20m=C3=AAme=20sans=20rappo?=
  =?UTF-8?q?rt=20de=20la=20page,=20journal?=
 MIME-Version: 1.0
@@ -389,5 +389,5 @@ index 6e0d93a..8348e28 100644
  
    async runCommand(cmd) {
 -- 
-2.43.0
+2.39.1.windows.1
 

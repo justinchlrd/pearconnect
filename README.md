@@ -8,7 +8,8 @@ Transfère le titre en cours, la position, la file et le mix d'origine entre ins
 - **Plugin Pear Connect dans Pear Desktop** (fork de Pear 3.12.0, `forks/pear-desktop`) : bouton « appareils » dans la barre du lecteur, barre « Lecture sur … » quand un autre appareil joue (titre, progression en direct, lecture/pause, précédent/suivant, déplacement, volume, « Écouter ici »). Le mix se recharge par la navigation interne de YouTube Music, en 1 à 2 s, sans redémarrer Pear. Il remplace l'agent `pearsync` sur les PC.
 - **Téléphone** : l'appli Android Pear Connect (≥ 0.3.0) se sert du mode « participant » du patch Morphe Jam : YouTube Music affiche lui-même ce qui joue sur un PC (file, barre de progression, commandes renvoyées au PC, « Quitter et lire ici »).
 - **Patch Morphe « Pear Connect »** (`forks/morphe-patches`, bundle `patches-1.47.0-pearconnect.1.mpp`) : ajoute l'identifiant du mix au pont Jam, pour que le mix suive aussi du téléphone vers un PC.
-- **Télécommande web** : `https://192.168.1.168:8443` (ou `http://…:8787`), avec volume et file « À suivre » cliquable.
+- **Télécommande web** : `https://192.168.1.168:8443` (ou `http://…:8787`), avec volume et file « À suivre » cliquable, réordonnable (monter/descendre) et éditable (retirer).
+- **File distribuée** : depuis n'importe quel appareil (PC, téléphone en mode participant, télécommande), on peut sauter à un titre, le retirer ou le déplacer dans la file de l'appareil qui joue (`jump`/`remove`/`move`).
 - **Un seul appareil joue à la fois** : lancer la lecture ailleurs met l'ancien en pause.
 
 ### PC : installer ou mettre à jour le plugin
@@ -21,7 +22,9 @@ irm http://192.168.1.168:8787/install.ps1 | iex
 
 Le script, servi par le serveur Connect, trouve Pear, vérifie sa version, reprend le nom et le jeton de l'ordinateur (plugin ou ancien agent, sinon il les demande et les vérifie), télécharge `app.asar` et l'AC en contrôlant leur SHA-256, sauvegarde l'original, configure le plugin, désactive l'ancien agent et relance Pear. Il se relance en administrateur si Pear est dans Program Files. Retour à Pear d'origine : `irm http://192.168.1.168:8787/uninstall.ps1 | iex`.
 
-Publier une nouvelle version : `python3 windows/build_dist.py app-asar.zip pearconnect-ca.crt PearConnect.apk`, puis copier `server/dist/` dans `/opt/pearconnect/dist/` du LXC.
+Sous Linux (paquet deb/rpm ou archive ; AppImage à extraire d'abord) : `curl -fsSL http://192.168.1.168:8787/install.sh | bash` (retour : `uninstall.sh`).
+
+Publier une nouvelle version : `python tools/build_asar.py --dist` (construit l'asar et régénère `server/dist/` avec les installeurs Windows et Linux), puis `bash tools/deploy_dist.sh` ; le serveur se déploie avec `bash tools/deploy_server.sh`. Détails dans `CLAUDE.md`.
 
 ### Téléphone
 
@@ -154,5 +157,6 @@ Chaque étape isole une couche : si l'une échoue, le problème est dans cette c
 
 ```
 python -m unittest tests/test_pearsync.py   # faux Pear + serveur Connect, sans réseau externe
+node --experimental-strip-types --test forks/pear-desktop/tests/protocol.test.ts   # fonctions pures du plugin
 ruff check . && mypy pearsync server/connect_server.py
 ```

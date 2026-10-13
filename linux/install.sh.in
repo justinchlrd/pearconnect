@@ -1,0 +1,179 @@
+#!/bin/bash
+# Pear Connect — installation en une commande sous Linux, servie par le serveur Connect.
+#
+#   Installer ou mettre à jour :   curl -fsSL http://192.168.1.168:8787/install.sh | bash
+#   Revenir à Pear d'origine :     curl -fsSL http://192.168.1.168:8787/uninstall.sh | bash
+#
+# Même logique que install.ps1 : trouve Pear Desktop __PEAR_VERSION__ (paquet deb/rpm, archive
+# dézippée ou AppImage extraite ; pas l'AppImage scellée), télécharge app.asar et l'AC du homelab
+# en vérifiant leur SHA-256, reprend le nom et le jeton (plugin ou ancien agent pearsync), sauvegarde
+# l'original, configure le plugin et relance Pear. Demande sudo si le dossier de Pear n'est pas inscriptible.
+set -euo pipefail
+
+ACTION='__ACTION__'
+BASE='__BASE_URL__'
+CONNECT_URL='__CONNECT_URL__'
+EXPECTED_VERSION='__PEAR_VERSION__'
+ASAR_SHA256='__ASAR_SHA256__'
+CA_SHA256='__CA_SHA256__'
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+PEAR_CONFIG="$CONFIG_DIR/YouTube Music/config.json"
+DATA_DIR="$CONFIG_DIR/pearsync"
+CA_DEST="$DATA_DIR/pearconnect-ca.crt"
+
+step() { printf '\n\033[36m==> %s\033[0m\n' "$1"; }
+fail() { printf '\n\033[31m%s\033[0m\n' "$1" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "outil manquant : $1"; }
+need curl; need python3; need sha256sum
+
+# --- Pear Desktop -------------------------------------------------------------------------------
+find_pear_dir() {
+  local exe
+  exe=$(ps -eo args= 2>/dev/null | grep -iE '(^|/)(youtube-music|pear-desktop|YouTube Music)( |$)' | grep -v grep | head -1 | awk '{print $1}')
+  if [ -n "$exe" ] && [ -f "$(dirname "$exe")/resources/app.asar" ]; then dirname "$exe"; return; fi
+  local c
+  for c in "/opt/YouTube Music" /opt/youtube-music "/opt/Pear Desktop" /opt/pear-desktop \
+           /usr/lib/youtube-music /usr/lib/pear-desktop "$HOME/.local/opt/youtube-music" "$HOME/Applications/youtube-music"; do
+    [ -f "$c/resources/app.asar" ] && { echo "$c"; return; }
+  done
+  return 1
+}
+
+pear_exe() { # binaire Electron dans le dossier de Pear
+  local d=$1 n
+  for n in youtube-music pear-desktop "YouTube Music"; do [ -x "$d/$n" ] && { echo "$d/$n"; return; }; done
+  return 1
+}
+
+pear_version() {
+  local d=$1
+  python3 - "$d/resources/app.asar" <<'PY'
+import re, sys
+raw = open(sys.argv[1], "rb").read(2_000_000)
+m = re.search(rb'"version":"(\d+\.\d+\.\d+)"', raw)
+print(m.group(1).decode() if m else "")
+PY
+}
+
+stop_pear() {
+  pkill -f -- "$1" 2>/dev/null || return 0
+  for _ in $(seq 1 16); do pgrep -f -- "$1" >/dev/null || return 0; sleep 0.5; done
+  pkill -9 -f -- "$1" 2>/dev/null || true
+}
+
+as_owner() { # commande avec sudo si le dossier n'est pas inscriptible
+  if [ -w "$RESOURCES" ]; then "$@"; else sudo "$@"; fi
+}
+
+# --- configuration de Pear (JSON) ----------------------------------------------------------------
+cfg_get() { # cfg_get <chemin.json.pointé>
+  [ -f "$PEAR_CONFIG" ] || return 0
+  python3 - "$PEAR_CONFIG" "$1" <<'PY'
+import json, sys
+try:
+    node = json.load(open(sys.argv[1], encoding="utf-8"))
+    for k in sys.argv[2].split("."):
+        node = node[k]
+    print(node if isinstance(node, str) else json.dumps(node))
+except Exception:
+    pass
+PY
+}
+
+agent_token() { # ancien agent pearsync : [relay] node / token dans config.toml
+  local f="$DATA_DIR/config.toml"
+  [ -f "$f" ] || return 0
+  python3 - "$f" <<'PY'
+import sys, tomllib
+try:
+    relay = tomllib.load(open(sys.argv[1], "rb")).get("relay", {})
+    print(relay.get("node", ""), relay.get("token", ""))
+except Exception:
+    pass
+PY
+}
+
+test_token() { [ "$(curl -s -o /dev/null -w '%{http_code}' -m 8 -H "Authorization: Bearer $1" "$BASE/v1/snapshot")" = 200 ]; }
+
+get_verified() { # get_verified <nom> <sha256> <destination>
+  curl -fsSL -m 300 -o "$3" "$BASE/dl/$1"
+  local got; got=$(sha256sum "$3" | cut -d' ' -f1)
+  [ "$got" = "$2" ] || fail "empreinte inattendue pour $1 ($got)"
+}
+
+# --- déroulement ----------------------------------------------------------------------------------
+step 'Pear Desktop'
+PEAR_DIR=$(find_pear_dir) || fail "Pear Desktop introuvable (dossier contenant resources/app.asar). Une AppImage doit d'abord être extraite (--appimage-extract)."
+RESOURCES="$PEAR_DIR/resources"
+INSTALLED="$RESOURCES/app.asar"
+ORIGINAL="$RESOURCES/app.asar.original"
+EXE=$(pear_exe "$PEAR_DIR") || fail "binaire de Pear introuvable dans $PEAR_DIR"
+echo "$PEAR_DIR"
+
+if [ "$ACTION" = uninstall ]; then
+  [ -f "$ORIGINAL" ] || fail "Pear Connect n'est pas installé (pas de sauvegarde app.asar.original)."
+  stop_pear "$EXE"
+  as_owner cp -f "$ORIGINAL" "$INSTALLED"
+  as_owner rm -f "$ORIGINAL"
+  if [ -f "$PEAR_CONFIG" ]; then
+    python3 - "$PEAR_CONFIG" <<'PY'
+import json, sys
+p = sys.argv[1]; cfg = json.load(open(p, encoding="utf-8"))
+if cfg.get("plugins", {}).get("pear-connect"):
+    cfg["plugins"]["pear-connect"]["enabled"] = False
+    json.dump(cfg, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+  fi
+  (setsid "$EXE" >/dev/null 2>&1 &)
+  printf '\n\033[32mPear Desktop d'"'"'origine restauré.\033[0m\n'
+  exit 0
+fi
+
+VERSION=$(pear_version "$PEAR_DIR")
+case "$VERSION" in "$EXPECTED_VERSION"*) ;; *) fail "Pear Desktop ${VERSION:-?} installé : Pear Connect est construit pour la version $EXPECTED_VERSION." ;; esac
+echo "Version $VERSION"
+
+step 'Cet ordinateur'
+DEVICE=$(cfg_get plugins.pear-connect.device); TOKEN=$(cfg_get plugins.pear-connect.token); FROM='plugin'
+if [ -z "$DEVICE" ] || [ -z "$TOKEN" ]; then
+  read -r DEVICE TOKEN <<<"$(agent_token)" || true; FROM='agent pearsync'
+fi
+if [ -n "${TOKEN:-}" ] && ! test_token "$TOKEN"; then echo "Le jeton trouvé ($FROM) est refusé par le serveur."; DEVICE=''; TOKEN=''; fi
+while [ -z "${TOKEN:-}" ] || [ -z "${DEVICE:-}" ]; do
+  read -r -p "Nom de cet ordinateur sur le serveur Connect : " DEVICE </dev/tty
+  read -r -s -p "Jeton de « $DEVICE » (add-device sur le serveur) : " TOKEN </dev/tty; echo
+  FROM='saisi'
+  test_token "$TOKEN" || { echo 'Jeton refusé par le serveur, recommence.'; TOKEN=''; }
+done
+echo "« $DEVICE » (jeton repris : $FROM, accepté par le serveur)"
+
+step 'Téléchargement'
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+get_verified app-asar.zip "$ASAR_SHA256" "$WORK/app-asar.zip"
+python3 -c "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extract('app.asar', sys.argv[2])" "$WORK/app-asar.zip" "$WORK"
+mkdir -p "$DATA_DIR"
+get_verified pearconnect-ca.crt "$CA_SHA256" "$CA_DEST"
+echo 'Fichiers téléchargés et vérifiés (SHA-256).'
+
+step 'Installation'
+stop_pear "$EXE"
+if [ ! -f "$ORIGINAL" ]; then as_owner cp "$INSTALLED" "$ORIGINAL"; echo "Sauvegarde de l'original : $ORIGINAL"; fi
+as_owner cp -f "$WORK/app.asar" "$INSTALLED"
+
+mkdir -p "$(dirname "$PEAR_CONFIG")"
+[ -f "$PEAR_CONFIG" ] && cp -f "$PEAR_CONFIG" "$PEAR_CONFIG.pearconnect.bak"
+python3 - "$PEAR_CONFIG" "$CONNECT_URL" "$DEVICE" "$TOKEN" "$CA_DEST" <<'PY'
+import json, os, sys
+p, server, device, token, ca = sys.argv[1:6]
+cfg = json.load(open(p, encoding="utf-8")) if os.path.exists(p) else {}
+cfg.setdefault("plugins", {})["pear-connect"] = {
+    "enabled": True, "server": server, "device": device, "token": token, "caPath": ca}
+json.dump(cfg, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+chmod 600 "$PEAR_CONFIG"   # contient le jeton
+systemctl --user disable --now pearsync-agent.service 2>/dev/null && echo 'Ancien agent pearsync désactivé (le plugin le remplace).' || true
+
+(setsid "$EXE" >/dev/null 2>&1 &)
+printf '\n\033[32mPear Connect installé sur « %s ». Le bouton « appareils » est dans la barre du lecteur.\033[0m\n' "$DEVICE"

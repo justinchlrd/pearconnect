@@ -523,7 +523,7 @@ function createUi(send: (action: UiAction) => Promise<ActionResult>) {
         qart.style.backgroundImage = `url("https://i.ytimg.com/vi/${row.video_id}/hqdefault.jpg")`;
       }
       const label = row.title || row.video_id;
-      const video_id = row.video_id;
+      const videoId = row.video_id;
       qlist.append(
         h(
           'div',
@@ -534,7 +534,7 @@ function createUi(send: (action: UiAction) => Promise<ActionResult>) {
               'class': 'qmain',
               'aria-label': `Jouer ${label}`,
               'onclick': () => {
-                act({ op: 'control', action: 'jump', video_id });
+                act({ op: 'control', action: 'jump', video_id: videoId });
               },
             },
             qart,
@@ -548,21 +548,21 @@ function createUi(send: (action: UiAction) => Promise<ActionResult>) {
           edit('up', 'Monter', i === 0, {
             op: 'control',
             action: 'move',
-            video_id,
+            video_id: videoId,
             index: i,
             to: i - 1,
           }),
           edit('down', 'Descendre', i === rows.length - 1, {
             op: 'control',
             action: 'move',
-            video_id,
+            video_id: videoId,
             index: i,
             to: i + 1,
           }),
           edit('close', 'Retirer de la file', false, {
             op: 'control',
             action: 'remove',
-            video_id,
+            video_id: videoId,
             index: i,
           }),
         ),

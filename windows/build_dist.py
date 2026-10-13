@@ -19,6 +19,7 @@ def main(asar_zip: str, ca: str, apk: str) -> None:
     shutil.copy(ca, DIST / "pearconnect-ca.crt")
     shutil.copy(apk, DIST / "PearConnect.apk")
     tpl = (ROOT / "windows" / "install.ps1.in").read_text(encoding="utf-8")
+    tpl_sh = (ROOT / "linux" / "install.sh.in").read_text(encoding="utf-8")
     values = {
         "__BASE_URL__": BASE, "__CONNECT_URL__": CONNECT, "__PEAR_VERSION__": PEAR_VERSION,
         "__ASAR_SHA256__": sha(DIST / "app-asar.zip"), "__CA_SHA256__": sha(DIST / "pearconnect-ca.crt"),
@@ -30,6 +31,12 @@ def main(asar_zip: str, ca: str, apk: str) -> None:
         assert "__" not in "".join(t for t in text.split() if t.startswith("'__")), "placeholder oublié"
         # servi en text/plain; charset=utf-8 : pas de BOM (irm | iex le garderait dans le code)
         (DIST / f"{action}.ps1").write_bytes(text.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8"))
+        # Linux : même logique en bash (curl …/install.sh | bash), fins de ligne LF
+        sh = tpl_sh.replace("__ACTION__", action)
+        for k, v in values.items():
+            sh = sh.replace(k, v)
+        assert "__" not in "".join(t for t in sh.split() if t.startswith("'__")), "placeholder oublié (sh)"
+        (DIST / f"{action}.sh").write_bytes(sh.replace("\r\n", "\n").encode("utf-8"))
     for f in sorted(DIST.iterdir()):
         print(f"{f.name:22} {sha(f)[:16]}  {f.stat().st_size} o")
 

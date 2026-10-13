@@ -1,7 +1,7 @@
-From 422c797a6d041fc1df6671c1876cdc7cb9880518 Mon Sep 17 00:00:00 2001
+From 6d630c1264d09aa75fbf9ddc158b82b899aa1649 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 12 Oct 2026 21:42:25 +0200
-Subject: [PATCH 2/3] =?UTF-8?q?fix(pear-connect):=20m=C3=AAme=20file=20que?=
+Subject: [PATCH 2/4] =?UTF-8?q?fix(pear-connect):=20m=C3=AAme=20file=20que?=
  =?UTF-8?q?=20la=20source=20au=20transfert,=20reprise=20sur=20un=20Pear=20?=
  =?UTF-8?q?tout=20juste=20lanc=C3=A9?=
 MIME-Version: 1.0
@@ -141,5 +141,5 @@ index f8707c9..6e0d93a 100644
      const current = entries.find((e) => e.selected)?.index ?? -1;
      if (current < 0) return;
 -- 
-2.43.0
+2.39.1.windows.1
 
