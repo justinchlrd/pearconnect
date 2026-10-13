@@ -1,2 +1,6 @@
 pki/ca.key
 pki/server.key
+
+# Sorties de build (python tools/build_asar.py --dist) : publiées sur le serveur et dans les Releases GitHub
+server/dist/*
+!server/dist/pearconnect-ca.crt
