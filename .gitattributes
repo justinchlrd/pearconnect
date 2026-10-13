@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.apk binary
+*.zip binary
+*.jks binary
