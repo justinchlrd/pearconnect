@@ -1,0 +1,1697 @@
+From f85027600836f0c67cd12df61a35427202b7036e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 12 Oct 2026 21:42:25 +0200
+Subject: [PATCH 1/3] feat(pear-connect): plugin Pear Connect (Spotify Connect
+ pour YouTube Music)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HT9b4swJXpQ34wjMzpWviQ
+---
+ src/plugins/pear-connect/backend.ts  | 289 ++++++++++
+ src/plugins/pear-connect/client.ts   | 230 ++++++++
+ src/plugins/pear-connect/config.ts   |  19 +
+ src/plugins/pear-connect/index.ts    |  19 +
+ src/plugins/pear-connect/menu.ts     |  99 ++++
+ src/plugins/pear-connect/protocol.ts | 212 ++++++++
+ src/plugins/pear-connect/renderer.ts | 759 +++++++++++++++++++++++++++
+ 7 files changed, 1627 insertions(+)
+ create mode 100644 src/plugins/pear-connect/backend.ts
+ create mode 100644 src/plugins/pear-connect/client.ts
+ create mode 100644 src/plugins/pear-connect/config.ts
+ create mode 100644 src/plugins/pear-connect/index.ts
+ create mode 100644 src/plugins/pear-connect/menu.ts
+ create mode 100644 src/plugins/pear-connect/protocol.ts
+ create mode 100644 src/plugins/pear-connect/renderer.ts
+
+diff --git a/src/plugins/pear-connect/backend.ts b/src/plugins/pear-connect/backend.ts
+new file mode 100644
+index 0000000..e2cbf94
+--- /dev/null
++++ b/src/plugins/pear-connect/backend.ts
+@@ -0,0 +1,289 @@
++/*
++ * Pear Connect, processus principal : relie ce Pear Desktop au serveur Connect.
++ *  - publie l'état de lecture (titre, position, mix, file, volume) ;
++ *  - relève et exécute les commandes (long-poll) ;
++ *  - relaie le flux temps réel du serveur à la page (barre « Lecture sur … »).
++ */
++import { getSongControls } from '@/providers/song-controls';
++import { registerCallback, type SongInfo } from '@/providers/song-info';
++import { createBackend } from '@/utils';
++
++import { ConnectClient, ConnectError } from './client';
++import {
++  type ActionResult,
++  type Command,
++  type PlaybackState,
++  type Snapshot,
++  type UiAction,
++  cleanPlaylistId,
++  stateChanged,
++} from './protocol';
++
++import type { PearConnectConfig } from './config';
++import type { BackendContext } from '@/types/contexts';
++
++/** État de lecture lu dans la page (positions en secondes). */
++export interface LocalReport {
++  videoId: string;
++  /** Contexte de lecture lu dans l'adresse de la page (…&list=RD…) */
++  playlistId: string;
++  title: string;
++  artist: string;
++  position: number;
++  duration: number;
++  paused: boolean;
++  volume: number | null;
++  upcoming: string[];
++  queue: PlaybackState['queue'];
++}
++
++const PUBLISH_EVERY = 2_000;
++const HEARTBEAT = 15_000;
++const LONG_POLL = 20;
++const LOG = '[Pear Connect]';
++
++const sleep = (ms: number, signal: AbortSignal) =>
++  new Promise<void>((resolve) => {
++    const t = setTimeout(resolve, ms);
++    signal.addEventListener('abort', () => {
++      clearTimeout(t);
++      resolve();
++    });
++  });
++
++type Props = {
++  ctx?: BackendContext<PearConnectConfig>;
++  client?: ConnectClient;
++  config?: PearConnectConfig;
++  abort?: AbortController;
++  song?: SongInfo;
++  local?: LocalReport;
++  localAt: number;
++  published: PlaybackState | null | undefined;
++  publishedAt: number;
++  snapshot?: Snapshot;
++  status: string;
++  callbackRegistered: boolean;
++  run(config: PearConnectConfig): void;
++  halt(): void;
++  currentState(): PlaybackState | null;
++  publishLoop(signal: AbortSignal): Promise<void>;
++  commandLoop(signal: AbortSignal): Promise<void>;
++  eventsLoop(signal: AbortSignal): Promise<void>;
++  execute(cmd: Command): void;
++  action(action: UiAction): Promise<ActionResult>;
++  pushSnapshot(): void;
++  setStatus(status: string): void;
++};
++
++export const backend = createBackend<Props, PearConnectConfig>({
++  localAt: 0,
++  published: undefined,
++  publishedAt: 0,
++  status: 'désactivé',
++  callbackRegistered: false,
++
++  async start(ctx) {
++    this.ctx = ctx;
++    if (!this.callbackRegistered) {
++      // pas de désinscription possible : on filtre selon this.abort
++      registerCallback((info) => {
++        this.song = info;
++      });
++      this.callbackRegistered = true;
++    }
++    ctx.ipc.on('pear-connect:local', (report: LocalReport) => {
++      this.local = report;
++      this.localAt = Date.now();
++    });
++    ctx.ipc.on('pear-connect:ready', () => this.pushSnapshot());
++    ctx.ipc.handle('pear-connect:action', (action: UiAction) =>
++      this.action(action),
++    );
++    this.run(await ctx.getConfig());
++  },
++
++  stop() {
++    this.halt();
++    this.ctx?.ipc.removeHandler('pear-connect:action');
++  },
++
++  onConfigChange(config) {
++    this.halt();
++    this.run(config);
++  },
++
++  run(config) {
++    this.config = config;
++    if (!config.server || !config.token || !config.device) {
++      this.setStatus('à configurer (menu Plugins › Pear Connect)');
++      return;
++    }
++    try {
++      this.client = new ConnectClient(config);
++    } catch (e) {
++      this.setStatus(`configuration invalide : ${(e as Error).message}`);
++      return;
++    }
++    const abort = new AbortController();
++    this.abort = abort;
++    this.published = undefined;
++    this.publishLoop(abort.signal);
++    this.commandLoop(abort.signal);
++    this.eventsLoop(abort.signal);
++    console.log(LOG, `appareil « ${config.device} » sur ${config.server}`);
++  },
++
++  halt() {
++    this.abort?.abort();
++    this.abort = undefined;
++    this.client = undefined;
++    this.snapshot = undefined;
++    this.pushSnapshot();
++  },
++
++  setStatus(status) {
++    if (status !== this.status) console.log(LOG, status);
++    this.status = status;
++  },
++
++  currentState() {
++    const local = this.local;
++    // la page n'a rien envoyé depuis 10 s : Pear est en train de (re)charger
++    if (!local || !local.videoId || Date.now() - this.localAt > 10_000)
++      return null;
++    const song = this.song?.videoId === local.videoId ? this.song : undefined;
++    return {
++      video_id: local.videoId,
++      position: local.position,
++      paused: local.paused,
++      duration: local.duration || song?.songDuration || 0,
++      title: song?.title || local.title,
++      artist: song?.artist || local.artist,
++      playlist_id:
++        cleanPlaylistId(local.playlistId) || cleanPlaylistId(song?.playlistId),
++      upcoming: local.upcoming,
++      queue: local.queue,
++      volume: local.volume,
++    };
++  },
++
++  async publishLoop(signal) {
++    let backoff = PUBLISH_EVERY;
++    while (!signal.aborted) {
++      try {
++        const state = this.currentState();
++        const now = Date.now();
++        if (
++          this.published === undefined ||
++          stateChanged(
++            this.published,
++            state,
++            (now - this.publishedAt) / 1000,
++          ) ||
++          now - this.publishedAt >= HEARTBEAT
++        ) {
++          await this.client!.putState(state);
++          this.published = state;
++          this.publishedAt = now;
++        }
++        this.setStatus('connecté');
++        backoff = PUBLISH_EVERY;
++      } catch (e) {
++        this.setStatus(`serveur : ${(e as Error).message}`);
++        backoff = Math.min(backoff * 2, 30_000);
++      }
++      await sleep(backoff, signal);
++    }
++  },
++
++  async commandLoop(signal) {
++    let failures = 0;
++    while (!signal.aborted) {
++      try {
++        const commands = await this.client!.takeCommands(LONG_POLL);
++        if (signal.aborted) return;
++        for (const cmd of commands) {
++          try {
++            this.execute(cmd);
++          } catch (e) {
++            console.warn(LOG, `commande ${cmd.type} en échec`, e);
++          }
++        }
++        if (commands.length) this.publishedAt = 0; // republier vite le nouvel état
++        failures = 0;
++      } catch (e) {
++        if (e instanceof ConnectError && e.status === 401)
++          this.setStatus('jeton refusé par le serveur');
++        failures += 1;
++        await sleep(
++          Math.min(2_000 << Math.min(failures - 1, 4), 30_000),
++          signal,
++        );
++      }
++    }
++  },
++
++  async eventsLoop(signal) {
++    while (!signal.aborted) {
++      try {
++        await this.client!.events((snap) => {
++          this.snapshot = snap;
++          this.pushSnapshot();
++        }, signal);
++      } catch {
++        /* coupure : on se reconnecte */
++      }
++      await sleep(3_000, signal);
++    }
++  },
++
++  pushSnapshot() {
++    const win = this.ctx?.window;
++    if (!win || win.isDestroyed()) return;
++    win.webContents.send('pear-connect:snapshot', {
++      snapshot: this.snapshot ?? null,
++      self: this.config?.device ?? '',
++      status: this.status,
++    });
++  },
++
++  execute(cmd) {
++    const win = this.ctx!.window;
++    if (cmd.type === 'enqueue') {
++      getSongControls(win).addSongToQueue(
++        cmd.video_id,
++        cmd.next ? 'INSERT_AFTER_CURRENT_VIDEO' : 'INSERT_AT_END',
++      );
++      return;
++    }
++    if (cmd.type === 'resume') {
++      console.log(
++        LOG,
++        `reprise de ${cmd.state.video_id} (${cmd.state.playlist_id || 'sans mix'})`,
++      );
++    }
++    // Le reste passe par l'API du lecteur dans la page : indépendant de la mise en page
++    // de YouTube Music (barre du lecteur classique ou nouveau mini-lecteur).
++    win.webContents.send('pear-connect:command', cmd);
++  },
++
++  async action(action) {
++    const client = this.client;
++    if (!client) return { ok: false, error: `Pear Connect ${this.status}` };
++    try {
++      if (action.op === 'hello') {
++        this.pushSnapshot();
++      } else if (action.op === 'transfer') {
++        await client.transfer(action.target);
++      } else if (action.op === 'control') {
++        const body: Record<string, unknown> = { ...action };
++        delete body.op;
++        await client.control(body);
++      }
++      return { ok: true };
++    } catch (e) {
++      return { ok: false, error: (e as Error).message };
++    }
++  },
++});
+diff --git a/src/plugins/pear-connect/client.ts b/src/plugins/pear-connect/client.ts
+new file mode 100644
+index 0000000..29907e0
+--- /dev/null
++++ b/src/plugins/pear-connect/client.ts
+@@ -0,0 +1,230 @@
++/*
++ * Client HTTP(S) du serveur Connect, côté processus principal (Node).
++ * node:https plutôt que fetch : permet de faire confiance à l'autorité de
++ * certification du homelab sans l'installer dans Windows.
++ */
++import { readFileSync } from 'node:fs';
++import { request as httpRequest, type IncomingMessage } from 'node:http';
++import { request as httpsRequest } from 'node:https';
++
++import type { Command, PlaybackState, Snapshot } from './protocol';
++
++export class ConnectError extends Error {
++  constructor(
++    message: string,
++    readonly status = 0,
++  ) {
++    super(message);
++  }
++}
++
++export interface ClientOptions {
++  server: string;
++  token: string;
++  device: string;
++  caPath?: string;
++}
++
++const MAX_BODY = 2 * 1024 * 1024;
++
++export class ConnectClient {
++  private readonly base: URL;
++  private readonly ca?: Buffer;
++
++  constructor(private readonly opts: ClientOptions) {
++    this.base = new URL(opts.server.replace(/\/+$/, '') + '/');
++    if (this.base.protocol !== 'http:' && this.base.protocol !== 'https:') {
++      throw new ConnectError(
++        'adresse du serveur invalide (http:// ou https://)',
++      );
++    }
++    if (opts.caPath) this.ca = readFileSync(opts.caPath);
++  }
++
++  private open(
++    method: string,
++    path: string,
++    body: unknown,
++    timeoutMs: number,
++    onResponse: (res: IncomingMessage) => void,
++    onError: (err: Error) => void,
++    signal?: AbortSignal,
++  ) {
++    const url = new URL(path.replace(/^\//, ''), this.base);
++    const data =
++      body === undefined ? undefined : Buffer.from(JSON.stringify(body));
++    const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(
++      url,
++      {
++        method,
++        ca: this.ca,
++        signal,
++        headers: {
++          'Authorization': `Bearer ${this.opts.token}`,
++          ...(data
++            ? {
++                'Content-Type': 'application/json',
++                'Content-Length': data.length,
++              }
++            : method === 'GET'
++              ? {}
++              : { 'Content-Length': 0 }),
++        },
++      },
++      onResponse,
++    );
++    req.setTimeout(timeoutMs, () =>
++      req.destroy(new ConnectError('délai dépassé')),
++    );
++    req.on('error', onError);
++    req.end(data);
++  }
++
++  request<T>(
++    method: string,
++    path: string,
++    body?: unknown,
++    timeoutMs = 15_000,
++  ): Promise<T> {
++    return new Promise<T>((resolve, reject) => {
++      this.open(
++        method,
++        path,
++        body,
++        timeoutMs,
++        (res) => {
++          const chunks: Buffer[] = [];
++          let size = 0;
++          res.on('data', (c: Buffer) => {
++            size += c.length;
++            if (size > MAX_BODY)
++              res.destroy(new ConnectError('réponse trop grande'));
++            else chunks.push(c);
++          });
++          res.on('error', (e) => reject(e));
++          res.on('end', () => {
++            const text = Buffer.concat(chunks).toString('utf8');
++            const status = res.statusCode ?? 0;
++            if (status === 401)
++              return reject(
++                new ConnectError('jeton refusé par le serveur', 401),
++              );
++            if (status >= 400) {
++              let detail = '';
++              try {
++                detail = (JSON.parse(text) as { error?: string }).error ?? '';
++              } catch {
++                /* corps non JSON */
++              }
++              return reject(
++                new ConnectError(
++                  `HTTP ${status}${detail ? ` : ${detail}` : ''}`,
++                  status,
++                ),
++              );
++            }
++            try {
++              resolve((text ? JSON.parse(text) : null) as T);
++            } catch {
++              reject(new ConnectError('réponse illisible'));
++            }
++          });
++        },
++        (err) =>
++          reject(
++            err instanceof ConnectError
++              ? err
++              : new ConnectError(`serveur injoignable : ${err.message}`),
++          ),
++      );
++    });
++  }
++
++  private get node() {
++    return encodeURIComponent(this.opts.device);
++  }
++
++  putState(state: PlaybackState | null) {
++    return this.request('PUT', `/v1/devices/${this.node}/state`, {
++      kind: 'pear',
++      state,
++    });
++  }
++
++  async takeCommands(waitSeconds: number): Promise<Command[]> {
++    const res = await this.request<{ commands?: Command[] }>(
++      'POST',
++      `/v1/devices/${this.node}/commands/take?wait=${waitSeconds}`,
++      undefined,
++      (waitSeconds + 15) * 1000,
++    );
++    return res?.commands ?? [];
++  }
++
++  snapshot() {
++    return this.request<Snapshot>('GET', '/v1/snapshot');
++  }
++
++  transfer(target: string) {
++    return this.request('POST', '/v1/transfer', { target });
++  }
++
++  control(body: Record<string, unknown>) {
++    return this.request('POST', '/v1/control', body);
++  }
++
++  /** Flux temps réel /v1/events : appelle `onSnapshot` à chaque changement, jusqu'à coupure. */
++  events(
++    onSnapshot: (snap: Snapshot) => void,
++    signal: AbortSignal,
++  ): Promise<void> {
++    return new Promise<void>((resolve, reject) => {
++      this.open(
++        'GET',
++        '/v1/events',
++        undefined,
++        60_000, // le serveur envoie un keepalive toutes les 20 s
++        (res) => {
++          if ((res.statusCode ?? 0) >= 400) {
++            res.resume();
++            return reject(
++              new ConnectError(
++                `HTTP ${res.statusCode} sur /v1/events`,
++                res.statusCode,
++              ),
++            );
++          }
++          res.setEncoding('utf8');
++          let buffer = '';
++          res.on('data', (chunk: string) => {
++            buffer += chunk;
++            if (buffer.length > MAX_BODY) {
++              res.destroy(new ConnectError('flux trop volumineux'));
++              return;
++            }
++            let sep: number;
++            while ((sep = buffer.indexOf('\n\n')) >= 0) {
++              const block = buffer.slice(0, sep);
++              buffer = buffer.slice(sep + 2);
++              const data = block
++                .split('\n')
++                .filter((l) => l.startsWith('data:'))
++                .map((l) => l.slice(5).trimStart())
++                .join('\n');
++              if (!data) continue;
++              try {
++                onSnapshot(JSON.parse(data) as Snapshot);
++              } catch {
++                /* bloc illisible : ignoré */
++              }
++            }
++          });
++          res.on('end', () => resolve());
++          res.on('error', (e) => reject(e));
++        },
++        (err) => reject(err),
++        signal,
++      );
++    });
++  }
++}
+diff --git a/src/plugins/pear-connect/config.ts b/src/plugins/pear-connect/config.ts
+new file mode 100644
+index 0000000..458e4e3
+--- /dev/null
++++ b/src/plugins/pear-connect/config.ts
+@@ -0,0 +1,19 @@
++export interface PearConnectConfig {
++  enabled: boolean;
++  /** Adresse du serveur Connect, par ex. https://192.168.1.168:8443 */
++  server: string;
++  /** Nom de cet ordinateur auprès du serveur (celui donné à add-device). */
++  device: string;
++  /** Jeton de l'appareil (affiché une seule fois par add-device). */
++  token: string;
++  /** Autorité de certification du serveur (PEM), si elle n'est pas dans le magasin du système. */
++  caPath: string;
++}
++
++export const defaultPearConnectConfig: PearConnectConfig = {
++  enabled: false,
++  server: '',
++  device: '',
++  token: '',
++  caPath: '',
++};
+diff --git a/src/plugins/pear-connect/index.ts b/src/plugins/pear-connect/index.ts
+new file mode 100644
+index 0000000..76ed554
+--- /dev/null
++++ b/src/plugins/pear-connect/index.ts
+@@ -0,0 +1,19 @@
++import { createPlugin } from '@/utils';
++
++import { backend } from './backend';
++import { defaultPearConnectConfig } from './config';
++import { onMenu } from './menu';
++import { renderer } from './renderer';
++
++export default createPlugin({
++  name: () => 'Pear Connect',
++  description: () =>
++    'Comme Spotify Connect : voir ce qui joue sur vos autres appareils, transférer la lecture (titre, position et mix) et les piloter depuis Pear.',
++  restartNeeded: false,
++  config: defaultPearConnectConfig,
++  addedVersion: '3.12.X',
++  menu: onMenu,
++
++  backend,
++  renderer,
++});
+diff --git a/src/plugins/pear-connect/menu.ts b/src/plugins/pear-connect/menu.ts
+new file mode 100644
+index 0000000..8d4d46a
+--- /dev/null
++++ b/src/plugins/pear-connect/menu.ts
+@@ -0,0 +1,99 @@
++import prompt from 'custom-electron-prompt';
++import { dialog, shell, type MenuItemConstructorOptions } from 'electron';
++
++import promptOptions from '@/providers/prompt-options';
++
++import type { PearConnectConfig } from './config';
++import type { MenuContext } from '@/types/contexts';
++
++const ask = async (
++  window: MenuContext<PearConnectConfig>['window'],
++  title: string,
++  label: string,
++  value: string,
++  type: 'input' = 'input',
++) =>
++  await prompt(
++    { title, label, value, type, width: 460, ...promptOptions() },
++    window,
++  );
++
++export const onMenu = async ({
++  getConfig,
++  setConfig,
++  window,
++}: MenuContext<PearConnectConfig>): Promise<MenuItemConstructorOptions[]> => {
++  const config = await getConfig();
++  const masked = config.token ? '•••• (enregistré)' : 'à renseigner';
++
++  return [
++    {
++      label: `Serveur : ${config.server || 'à renseigner'}`,
++      async click() {
++        const value = await ask(
++          window,
++          'Pear Connect',
++          'Adresse du serveur Connect (ex. https://192.168.1.168:8443)',
++          (await getConfig()).server,
++        );
++        if (value !== null)
++          setConfig({ server: value.trim().replace(/\/+$/, '') });
++      },
++    },
++    {
++      label: `Nom de cet ordinateur : ${config.device || 'à renseigner'}`,
++      async click() {
++        const value = await ask(
++          window,
++          'Pear Connect',
++          'Nom de cet ordinateur sur le serveur (celui donné à add-device)',
++          (await getConfig()).device,
++        );
++        if (value !== null && /^[A-Za-z0-9_.-]{1,64}$/.test(value.trim())) {
++          setConfig({ device: value.trim() });
++        }
++      },
++    },
++    {
++      label: `Jeton : ${masked}`,
++      async click() {
++        const value = await ask(
++          window,
++          'Pear Connect',
++          "Jeton de l'appareil (jetons.txt)",
++          '',
++        );
++        if (value) setConfig({ token: value.trim() });
++      },
++    },
++    {
++      label: `Autorité de certification : ${config.caPath || 'magasin de Windows'}`,
++      submenu: [
++        {
++          label: 'Choisir le fichier (.crt, .pem)…',
++          async click() {
++            const result = await dialog.showOpenDialog(window, {
++              title: 'Autorité de certification du serveur Connect',
++              filters: [
++                { name: 'Certificat', extensions: ['crt', 'pem', 'cer'] },
++              ],
++              properties: ['openFile'],
++            });
++            if (!result.canceled && result.filePaths[0])
++              setConfig({ caPath: result.filePaths[0] });
++          },
++        },
++        {
++          label: 'Utiliser le magasin de Windows',
++          click: () => setConfig({ caPath: '' }),
++        },
++      ],
++    },
++    { type: 'separator' },
++    {
++      label: 'Ouvrir la télécommande web',
++      enabled: /^https?:\/\//.test(config.server),
++      click: () => shell.openExternal(config.server),
++    },
++  ];
++};
+diff --git a/src/plugins/pear-connect/protocol.ts b/src/plugins/pear-connect/protocol.ts
+new file mode 100644
+index 0000000..2085c47
+--- /dev/null
++++ b/src/plugins/pear-connect/protocol.ts
+@@ -0,0 +1,212 @@
++/*
++ * Protocole du serveur Connect (pearsync, server/connect_server.py) et fonctions pures
++ * partagées entre le processus principal et la page.
++ */
++
++export const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
++const PLAYLIST_ID_RE = /^[A-Za-z0-9_-]{2,128}$/;
++export const QUEUE_LIMIT = 25;
++
++export interface QueueRow {
++  video_id: string;
++  title: string;
++  artist: string;
++}
++
++/** État de lecture publié par un appareil (positions en secondes). */
++export interface PlaybackState {
++  video_id: string;
++  position: number;
++  paused: boolean;
++  duration: number;
++  title: string;
++  artist: string;
++  playlist_id: string;
++  upcoming: string[];
++  queue: QueueRow[];
++  volume: number | null;
++  ts?: number;
++}
++
++export interface DeviceView {
++  kind: string;
++  online: boolean;
++  seen: number | null;
++  state: (Omit<PlaybackState, 'upcoming'> & { upcoming: number }) | null;
++}
++
++export interface Snapshot {
++  version: number;
++  now: number;
++  active: string | null;
++  session: { device: string; state: DeviceView['state'] } | null;
++  devices: Record<string, DeviceView>;
++}
++
++export type Command =
++  | { type: 'pause' | 'play' | 'next' | 'previous' }
++  | { type: 'seek'; seconds: number }
++  | { type: 'volume'; level: number }
++  | { type: 'jump'; video_id: string }
++  | { type: 'enqueue'; video_id: string; next: boolean }
++  | {
++      type: 'resume';
++      state: Partial<PlaybackState> & { video_id: string };
++      with_queue?: boolean;
++    };
++
++/** Message de la page vers le processus principal. */
++export type UiAction =
++  | { op: 'hello' }
++  | { op: 'transfer'; target: string }
++  | {
++      op: 'control';
++      action: string;
++      seconds?: number;
++      level?: number;
++      video_id?: string;
++      next?: boolean;
++    };
++
++export interface ActionResult {
++  ok: boolean;
++  error?: string;
++}
++
++/** Ce que la page sait de la lecture locale (file avec titres, volume). */
++export interface LocalExtras {
++  queue: QueueRow[];
++  upcoming: string[];
++  volume: number | null;
++}
++
++export const cleanPlaylistId = (value: unknown): string =>
++  typeof value === 'string' && PLAYLIST_ID_RE.test(value) ? value : '';
++
++/** Position d'un état « en lecture » `elapsed` secondes après sa capture. */
++export const extrapolate = (
++  state: { position: number; paused: boolean; duration: number },
++  elapsed: number,
++): number => {
++  let pos = state.position + (state.paused ? 0 : Math.max(0, elapsed));
++  if (state.duration > 0) pos = Math.min(pos, Math.max(0, state.duration - 1));
++  return pos;
++};
++
++/**
++ * L'état `next` diffère-t-il de ce que le serveur déduit déjà de `prev`, publié il y a
++ * `elapsed` secondes ? (inutile de republier une position qui avance normalement)
++ */
++export const stateChanged = (
++  prev: PlaybackState | null,
++  next: PlaybackState | null,
++  elapsed: number,
++  drift = 3,
++): boolean => {
++  if (!prev || !next) return prev !== next;
++  if (
++    prev.video_id !== next.video_id ||
++    prev.paused !== next.paused ||
++    prev.volume !== next.volume ||
++    prev.playlist_id !== next.playlist_id ||
++    prev.upcoming.join(',') !== next.upcoming.join(',')
++  ) {
++    return true;
++  }
++  return Math.abs(extrapolate(prev, elapsed) - next.position) > drift;
++};
++
++/** Point d'entrée « watch » de YouTube Music : titre, contexte (mix…) et position. */
++export const watchEndpoint = (
++  state: Partial<PlaybackState> & { video_id: string },
++): { videoId: string; playlistId?: string; startTimeSeconds?: number } => {
++  if (!VIDEO_ID_RE.test(state.video_id)) {
++    throw new Error('identifiant de titre invalide');
++  }
++  const endpoint: {
++    videoId: string;
++    playlistId?: string;
++    startTimeSeconds?: number;
++  } = { videoId: state.video_id };
++  const list = cleanPlaylistId(state.playlist_id);
++  if (list) endpoint.playlistId = list;
++  const start = Math.floor(state.position ?? 0);
++  if (start >= 1) endpoint.startTimeSeconds = start;
++  return endpoint;
++};
++
++type Runs = { runs?: { text?: string }[]; simpleText?: string } | undefined;
++const runsText = (node: Runs): string =>
++  node?.simpleText ?? (node?.runs ?? []).map((r) => r.text ?? '').join('');
++
++interface PanelRenderer {
++  videoId?: string;
++  selected?: boolean;
++  title?: Runs;
++  shortBylineText?: Runs;
++  longBylineText?: Runs;
++}
++
++const panelRenderer = (item: unknown): PanelRenderer | undefined => {
++  const it = item as {
++    playlistPanelVideoRenderer?: PanelRenderer;
++    playlistPanelVideoWrapperRenderer?: {
++      primaryRenderer?: { playlistPanelVideoRenderer?: PanelRenderer };
++    };
++  };
++  return (
++    it?.playlistPanelVideoRenderer ??
++    it?.playlistPanelVideoWrapperRenderer?.primaryRenderer
++      ?.playlistPanelVideoRenderer
++  );
++};
++
++export interface QueueEntry extends QueueRow {
++  index: number;
++  selected: boolean;
++}
++
++/** Éléments de la file de YouTube Music (store du lecteur) → lignes simples. */
++export const parseQueue = (items: unknown[] | undefined): QueueEntry[] => {
++  const out: QueueEntry[] = [];
++  (items ?? []).forEach((item, index) => {
++    const r = panelRenderer(item);
++    if (!r?.videoId) return;
++    const artist =
++      runsText(r.shortBylineText) ||
++      runsText(r.longBylineText).split(' • ')[0] ||
++      '';
++    out.push({
++      index,
++      video_id: r.videoId,
++      title: runsText(r.title),
++      artist,
++      selected: !!r.selected,
++    });
++  });
++  return out;
++};
++
++/** Titres qui suivent le titre en cours (au plus QUEUE_LIMIT). */
++export const upcomingRows = (entries: QueueEntry[]): QueueRow[] => {
++  const current = entries.findIndex((e) => e.selected);
++  if (current < 0) return [];
++  return entries.slice(current + 1, current + 1 + QUEUE_LIMIT).map((e) => ({
++    video_id: e.video_id,
++    title: e.title,
++    artist: e.artist,
++  }));
++};
++
++/** Index dans la file d'un titre, de préférence après le titre en cours. */
++export const indexOfVideo = (
++  entries: QueueEntry[],
++  videoId: string,
++): number | null => {
++  const current = entries.find((e) => e.selected)?.index ?? -1;
++  const after = entries.find(
++    (e) => e.index > current && e.video_id === videoId,
++  );
++  const any = after ?? entries.find((e) => e.video_id === videoId);
++  return any ? any.index : null;
++};
+diff --git a/src/plugins/pear-connect/renderer.ts b/src/plugins/pear-connect/renderer.ts
+new file mode 100644
+index 0000000..f8707c9
+--- /dev/null
++++ b/src/plugins/pear-connect/renderer.ts
+@@ -0,0 +1,759 @@
++/*
++ * Pear Connect, page YouTube Music :
++ *  - bouton « appareils » dans la barre du lecteur (liste, transfert, volume) ;
++ *  - barre « Lecture sur … » quand un autre appareil joue (titre, progression en direct,
++ *    lecture/pause, précédent/suivant, déplacement, volume, « Écouter ici ») ;
++ *  - lecture locale envoyée au processus principal (position, file, volume) ;
++ *  - reprise d'une session : titre ouvert DANS son mix par la navigation interne de
++ *    YouTube Music, sans redémarrer Pear, puis position recalée.
++ * DOM construit sans innerHTML (Trusted Types).
++ */
++import { createRenderer } from '@/utils';
++
++import {
++  type ActionResult,
++  type Command,
++  type DeviceView,
++  type Snapshot,
++  type UiAction,
++  QUEUE_LIMIT,
++  VIDEO_ID_RE,
++  indexOfVideo,
++  parseQueue,
++  upcomingRows,
++  watchEndpoint,
++} from './protocol';
++
++import type { LocalReport } from './backend';
++import type { PearConnectConfig } from './config';
++import type { RendererContext } from '@/types/contexts';
++import type { MusicPlayer } from '@/types/music-player';
++import type { MusicPlayerAppElement } from '@/types/music-player-app-element';
++import type { QueueElement } from '@/types/queue';
++
++const SVG_NS = 'http://www.w3.org/2000/svg';
++const ACCENT = '#1ed760';
++const ICONS = {
++  devices:
++    'M4 6h18V4H4c-1.1 0-2 .9-2 2v11H0v3h14v-3H4V6zm19 2h-6c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h6c.55 0 1-.45 1-1V9c0-.55-.45-1-1-1zm-1 9h-4v-7h4v7z',
++  computer:
++    'M20 18c1.1 0 1.99-.9 1.99-2L22 6c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2H0v2h24v-2h-4zM4 6h16v10H4V6z',
++  phone:
++    'M16 1H8C6.34 1 5 2.34 5 4v16c0 1.66 1.34 3 3 3h8c1.66 0 3-1.34 3-3V4c0-1.66-1.34-3-3-3zm-2 20h-4v-1h4v1zm3.25-3H6.75V4h10.5v14z',
++  play: 'M8 5v14l11-7z',
++  pause: 'M6 19h4V5H6v14zm8-14v14h4V5h-4z',
++  next: 'M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z',
++  prev: 'M6 6h2v12H6zm3.5 6l8.5 6V6z',
++  volume:
++    'M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z',
++  speaker:
++    'M17 2H7c-1.1 0-2 .9-2 2v16c0 1.1.9 1.99 2 1.99L17 22c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-5 2c1.1 0 2 .9 2 2s-.9 2-2 2a2 2 0 1 1 0-4zm0 16c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z',
++} as const;
++type IconName = keyof typeof ICONS;
++const KIND_ICON: Record<string, IconName> = {
++  pear: 'computer',
++  android: 'phone',
++};
++
++const STYLE = `
++:host { all: initial; }
++* { box-sizing: border-box; font-family: Roboto, Arial, sans-serif; }
++button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
++button:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; border-radius: 50%; }
++.bar { position: fixed; left: 0; right: 0; bottom: 0; height: var(--pc-height, 72px); z-index: 2000;
++  display: none; grid-template-columns: minmax(0, 1fr) minmax(280px, 2fr) minmax(0, 1fr); align-items: center;
++  gap: 16px; padding: 0 16px; background: #212121; color: #fff; border-top: 1px solid rgba(255,255,255,.08); }
++.bar.show { display: grid; }
++.now { display: flex; align-items: center; gap: 12px; min-width: 0; }
++.art { width: 48px; height: 48px; flex: none; border-radius: 4px; background: #333 center / auto 134% no-repeat; }
++.meta { min-width: 0; }
++.title { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
++.artist { font-size: 13px; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
++.where { display: flex; align-items: center; gap: 4px; font-size: 12px; color: ${ACCENT}; margin-top: 2px;
++  white-space: nowrap; overflow: hidden; }
++.center { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; }
++.controls { display: flex; align-items: center; gap: 12px; }
++.round { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 50%; color: #fff; }
++.round:hover { background: rgba(255,255,255,.1); }
++.round.big { background: #fff; color: #000; }
++.round.big:hover { background: #ddd; }
++.progress { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 12px; color: #aaa;
++  font-variant-numeric: tabular-nums; }
++.track { position: relative; flex: 1; height: 16px; cursor: pointer; }
++.track::before { content: ""; position: absolute; left: 0; right: 0; top: 7px; height: 3px; border-radius: 2px; background: #555; }
++.fill { position: absolute; left: 0; top: 7px; height: 3px; border-radius: 2px; background: #fff; }
++.track:hover .fill { background: ${ACCENT}; }
++.right { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
++.vol { display: flex; align-items: center; gap: 4px; color: #aaa; }
++input[type=range] { width: 96px; accent-color: ${ACCENT}; }
++.here { height: 32px; padding: 0 14px; border-radius: 16px; background: ${ACCENT}; color: #000; font-size: 13px;
++  font-weight: 500; white-space: nowrap; }
++.here:hover { filter: brightness(1.1); }
++.devbtn { color: ${ACCENT}; }
++.pop { position: fixed; right: 16px; bottom: calc(var(--pc-height, 72px) + 8px); z-index: 2001; width: 320px;
++  max-height: 60vh; overflow: auto; display: none; padding: 16px 8px 8px; border-radius: 8px; background: #282828;
++  color: #fff; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
++.pop.show { display: block; }
++.pop h2 { margin: 0 8px 4px; font-size: 16px; font-weight: 700; }
++.pop p.sub { margin: 0 8px 12px; font-size: 12px; color: #aaa; }
++.dev { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 8px; border-radius: 6px; text-align: left; }
++.dev:hover:not([disabled]) { background: rgba(255,255,255,.08); }
++.dev[disabled] { cursor: default; }
++.dev .name { font-size: 14px; font-weight: 500; }
++.dev .state { font-size: 12px; color: #aaa; }
++.dev.active .name, .dev.active .state, .dev.active svg { color: ${ACCENT}; }
++.dev.offline { opacity: .45; }
++.popvol { display: flex; align-items: center; gap: 8px; margin: 8px; color: #aaa; }
++.popvol input { flex: 1; width: auto; }
++.empty { margin: 8px; font-size: 13px; color: #aaa; }
++.toast { position: fixed; left: 50%; bottom: calc(var(--pc-height, 72px) + 16px); transform: translateX(-50%);
++  z-index: 2002; max-width: 80vw; padding: 10px 16px; border-radius: 6px; background: #f1f1f1; color: #000;
++  font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
++.toast.show { opacity: 1; }
++`;
++
++type Props = Record<string, unknown> & {
++  ctx?: RendererContext<PearConnectConfig>;
++  playerApi?: MusicPlayer;
++  timers: number[];
++  teardown?: () => void;
++  report(): void;
++  runCommand(cmd: Command): Promise<void>;
++  resume(
++    cmd: Extract<Command, { type: 'resume' }>,
++    receivedAt: number,
++  ): Promise<void>;
++  replaceUpcoming(ids: string[]): Promise<void>;
++};
++
++const queueElement = () => document.querySelector<QueueElement>('#queue');
++
++const wait = async (pred: () => boolean, timeoutMs: number, stepMs = 200) => {
++  const end = Date.now() + timeoutMs;
++  while (Date.now() < end) {
++    if (pred()) return true;
++    await new Promise((r) => setTimeout(r, stepMs));
++  }
++  return pred();
++};
++
++// -- utilitaires DOM ----------------------------------------------------------------
++type Child = Node | string | null | undefined | false;
++function h(
++  tag: string,
++  props: Record<string, string | ((ev: Event) => void)> = {},
++  ...children: Child[]
++): HTMLElement {
++  const el = document.createElement(tag);
++  for (const [k, v] of Object.entries(props)) {
++    if (typeof v === 'function') el.addEventListener(k.slice(2), v);
++    else if (k === 'text') el.textContent = v;
++    else el.setAttribute(k, v);
++  }
++  for (const c of children) if (c) el.append(c);
++  return el;
++}
++function icon(name: IconName, size = 24): SVGSVGElement {
++  const svg = document.createElementNS(SVG_NS, 'svg');
++  svg.setAttribute('viewBox', '0 0 24 24');
++  svg.setAttribute('width', String(size));
++  svg.setAttribute('height', String(size));
++  svg.setAttribute('aria-hidden', 'true');
++  svg.style.fill = 'currentColor';
++  svg.style.display = 'block';
++  svg.style.pointerEvents = 'none';
++  const path = document.createElementNS(SVG_NS, 'path');
++  path.setAttribute('d', ICONS[name]);
++  svg.append(path);
++  return svg;
++}
++const fmt = (sec: number) => {
++  const s = Math.max(0, Math.floor(sec || 0));
++  const m = Math.floor(s / 60);
++  return m >= 60
++    ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
++    : `${m}:${String(s % 60).padStart(2, '0')}`;
++};
++
++/** Interface : construite une fois, mise à jour à chaque snapshot du serveur. */
++function createUi(send: (action: UiAction) => Promise<ActionResult>) {
++  let snap: Snapshot | null = null;
++  let self = '';
++  let status = '';
++  let snapAt = 0;
++
++  const host = h('div', { id: 'pear-connect-root' });
++  const root = host.attachShadow({ mode: 'closed' });
++  root.append(h('style', { text: STYLE }));
++
++  const toastEl = h('div', { class: 'toast', role: 'status' });
++  let toastTimer = 0;
++  const toast = (message: string) => {
++    toastEl.textContent = message;
++    toastEl.classList.add('show');
++    clearTimeout(toastTimer);
++    toastTimer = window.setTimeout(
++      () => toastEl.classList.remove('show'),
++      3500,
++    );
++  };
++  const act = async (action: UiAction, okMessage?: string) => {
++    const res = await send(action);
++    if (!res.ok) toast(res.error || 'action impossible');
++    else if (okMessage) toast(okMessage);
++    return res.ok;
++  };
++
++  const devices = () => snap?.devices ?? {};
++  const activeName = () => snap?.active ?? null;
++  const activeState = () => {
++    const d = devices()[activeName() ?? ''];
++    return d?.online && d.state ? d.state : null;
++  };
++  const remoteActive = () =>
++    !!(activeName() && activeName() !== self && activeState());
++  const positionOf = (st: NonNullable<DeviceView['state']>) => {
++    let p = Number(st.position) || 0;
++    if (!st.paused) p += (performance.now() - snapAt) / 1000;
++    return st.duration ? Math.min(p, Math.max(0, st.duration - 1)) : p;
++  };
++  const listenHere = async () => {
++    if (
++      await act(
++        { op: 'transfer', target: self },
++        'Lecture transférée sur cet ordinateur',
++      )
++    )
++      hidePopover();
++  };
++
++  // barre « Lecture sur … »
++  const art = h('div', { class: 'art' });
++  const title = h('div', { class: 'title' });
++  const artist = h('div', { class: 'artist' });
++  const whereText = h('span');
++  const playBtn = h('button', {
++    'class': 'round big',
++    'aria-label': 'Lecture',
++    'onclick': () => {
++      const st = activeState();
++      act({ op: 'control', action: st && !st.paused ? 'pause' : 'play' });
++    },
++  });
++  const fill = h('div', { class: 'fill' });
++  const track = h(
++    'div',
++    {
++      'class': 'track',
++      'role': 'slider',
++      'aria-label': 'Position',
++      'onclick': (ev) => {
++        const st = activeState();
++        if (!st?.duration) return;
++        const r = track.getBoundingClientRect();
++        const seconds = Math.round(
++          (((ev as MouseEvent).clientX - r.left) / r.width) * st.duration,
++        );
++        act({ op: 'control', action: 'seek', seconds });
++      },
++    },
++    fill,
++  );
++  const pos = h('span');
++  const dur = h('span');
++  const volChange = (ev: Event) =>
++    act({
++      op: 'control',
++      action: 'volume',
++      level: Number((ev.target as HTMLInputElement).value),
++    });
++  const volRange = h('input', {
++    'type': 'range',
++    'min': '0',
++    'max': '100',
++    'aria-label': 'Volume de l’appareil',
++    'onchange': volChange,
++  }) as HTMLInputElement;
++  const vol = h('div', { class: 'vol' }, icon('volume', 20), volRange);
++  const devBtn = h(
++    'button',
++    {
++      'class': 'round devbtn',
++      'aria-label': 'Appareils',
++      'title': 'Appareils (Pear Connect)',
++      'onclick': (ev) => {
++        ev.stopPropagation();
++        togglePopover();
++      },
++    },
++    icon('devices', 22),
++  );
++  const bar = h(
++    'div',
++    {
++      'class': 'bar',
++      'role': 'region',
++      'aria-label': 'Lecture sur un autre appareil',
++    },
++    h(
++      'div',
++      { class: 'now' },
++      art,
++      h(
++        'div',
++        { class: 'meta' },
++        title,
++        artist,
++        h('div', { class: 'where' }, icon('speaker', 14), whereText),
++      ),
++    ),
++    h(
++      'div',
++      { class: 'center' },
++      h(
++        'div',
++        { class: 'controls' },
++        h(
++          'button',
++          {
++            'class': 'round',
++            'aria-label': 'Précédent',
++            'onclick': () => act({ op: 'control', action: 'previous' }),
++          },
++          icon('prev'),
++        ),
++        playBtn,
++        h(
++          'button',
++          {
++            'class': 'round',
++            'aria-label': 'Suivant',
++            'onclick': () => act({ op: 'control', action: 'next' }),
++          },
++          icon('next'),
++        ),
++      ),
++      h('div', { class: 'progress' }, pos, track, dur),
++    ),
++    h(
++      'div',
++      { class: 'right' },
++      vol,
++      devBtn,
++      h('button', {
++        class: 'here',
++        text: 'Écouter ici',
++        onclick: () => listenHere(),
++      }),
++    ),
++  );
++
++  // liste des appareils
++  const list = h('div');
++  const popSub = h('p', { class: 'sub' });
++  const popVolRange = h('input', {
++    'type': 'range',
++    'min': '0',
++    'max': '100',
++    'aria-label': 'Volume',
++    'onchange': volChange,
++  }) as HTMLInputElement;
++  const popVol = h('div', { class: 'popvol' }, icon('volume', 20), popVolRange);
++  const pop = h(
++    'div',
++    {
++      'class': 'pop',
++      'role': 'dialog',
++      'aria-label': 'Appareils',
++      'onclick': (ev) => ev.stopPropagation(),
++    },
++    h('h2', { text: 'Appareils' }),
++    popSub,
++    list,
++    popVol,
++  );
++  root.append(bar, pop, toastEl);
++
++  const deviceStatus = (name: string, d: DeviceView) => {
++    if (name === activeName() && d.online && d.state) {
++      return `${d.state.paused ? 'En pause' : 'En lecture'} · ${d.state.title || ''}`;
++    }
++    if (name === self) return 'Cet ordinateur';
++    return d.online ? 'Disponible' : 'Hors ligne';
++  };
++
++  function renderList() {
++    list.replaceChildren();
++    if (!snap) {
++      list.append(
++        h('p', {
++          class: 'empty',
++          text: `Pear Connect ${status || 'non connecté'}`,
++        }),
++      );
++    }
++    const entries = Object.entries(devices()).filter(
++      ([, d]) => d.kind !== 'web',
++    );
++    entries.sort(([a], [b]) =>
++      a === self ? -1 : b === self ? 1 : a.localeCompare(b),
++    );
++    for (const [name, d] of entries) {
++      const isActive = name === activeName() && d.online && !!d.state;
++      const btn = h(
++        'button',
++        {
++          class: `dev${isActive ? ' active' : ''}${d.online || name === self ? '' : ' offline'}`,
++          onclick: () => {
++            if (isActive) return;
++            if (name === self) {
++              listenHere();
++              return;
++            }
++            act(
++              { op: 'transfer', target: name },
++              `Lecture transférée sur ${name}`,
++            ).then((ok) => ok && hidePopover());
++          },
++        },
++        icon(KIND_ICON[d.kind] ?? 'speaker', 28),
++        h(
++          'div',
++          {},
++          h('div', {
++            class: 'name',
++            text: name === self ? `${name} (cet ordinateur)` : name,
++          }),
++          h('div', { class: 'state', text: deviceStatus(name, d) }),
++        ),
++      );
++      if (isActive) btn.setAttribute('disabled', '');
++      list.append(btn);
++    }
++    const st = activeState();
++    popSub.textContent = st
++      ? `Lecture sur ${activeName() === self ? 'cet ordinateur' : activeName()}`
++      : snap
++        ? 'Aucune lecture en cours'
++        : '';
++    const showVol = remoteActive() && st?.volume != null;
++    popVol.style.display = showVol ? 'flex' : 'none';
++    if (showVol && root.activeElement !== popVolRange)
++      popVolRange.value = String(st.volume);
++  }
++
++  const hidePopover = () => pop.classList.remove('show');
++  function togglePopover() {
++    if (pop.classList.contains('show')) return hidePopover();
++    renderList();
++    pop.classList.add('show');
++    send({ op: 'hello' });
++  }
++  const onDocClick = () => hidePopover();
++  const onKey = (ev: KeyboardEvent) => ev.key === 'Escape' && hidePopover();
++  document.addEventListener('click', onDocClick);
++  document.addEventListener('keydown', onKey);
++
++  // bouton dans la barre du lecteur de YouTube Music
++  const playerBarButton = h(
++    'button',
++    {
++      'id': 'pear-connect-devices',
++      'title': 'Appareils (Pear Connect)',
++      'aria-label': 'Appareils',
++      'onclick': (ev) => {
++        ev.stopPropagation();
++        togglePopover();
++      },
++    },
++    icon('devices'),
++  );
++  Object.assign(playerBarButton.style, {
++    width: '40px',
++    height: '40px',
++    display: 'grid',
++    placeItems: 'center',
++    background: 'none',
++    border: '0',
++    borderRadius: '50%',
++    cursor: 'pointer',
++    color: 'var(--yt-spec-text-secondary, #aaa)',
++    padding: '0',
++    margin: '0 4px',
++  });
++
++  function attach() {
++    if (!host.isConnected) document.body.append(host);
++    // barre du lecteur classique, ou nouveau mini-lecteur de YouTube Music (déploiement 2026)
++    const playerBar =
++      document.querySelector<HTMLElement>('ytmusic-player-bar') ??
++      document.querySelector<HTMLElement>('ytmusic-miniplayer');
++    const slot =
++      playerBar?.querySelector('.right-controls-buttons') ??
++      playerBar?.querySelector('.ytMusicMiniPlayerRightSection');
++    if (slot && playerBarButton.parentElement !== slot)
++      slot.prepend(playerBarButton);
++    host.style.setProperty(
++      '--pc-height',
++      playerBar?.offsetHeight ? `${playerBar.offsetHeight}px` : '72px',
++    );
++  }
++
++  function tick() {
++    if (!remoteActive()) return;
++    const st = activeState()!;
++    const p = positionOf(st);
++    pos.textContent = fmt(p);
++    dur.textContent = fmt(st.duration);
++    fill.style.width = st.duration
++      ? `${Math.min(100, (p / st.duration) * 100)}%`
++      : '0';
++  }
++
++  function render() {
++    attach();
++    const remote = remoteActive();
++    bar.classList.toggle('show', remote);
++    playerBarButton.style.color = remote
++      ? ACCENT
++      : 'var(--yt-spec-text-secondary, #aaa)';
++    if (remote) {
++      const st = activeState()!;
++      art.style.backgroundImage = VIDEO_ID_RE.test(st.video_id)
++        ? `url("https://i.ytimg.com/vi/${st.video_id}/hqdefault.jpg")`
++        : '';
++      title.textContent = st.title || st.video_id;
++      artist.textContent = st.artist || '';
++      whereText.textContent = `Lecture sur ${activeName()}`;
++      playBtn.replaceChildren(icon(st.paused ? 'play' : 'pause'));
++      playBtn.setAttribute('aria-label', st.paused ? 'Lecture' : 'Pause');
++      const hasVol = st.volume != null;
++      vol.style.display = hasVol ? 'flex' : 'none';
++      if (hasVol && root.activeElement !== volRange)
++        volRange.value = String(st.volume);
++      tick();
++    }
++    if (pop.classList.contains('show')) renderList();
++  }
++
++  const timers = [
++    window.setInterval(tick, 500),
++    window.setInterval(attach, 1000),
++  ];
++
++  return {
++    update(data: { snapshot: Snapshot | null; self: string; status: string }) {
++      snap = data.snapshot;
++      self = data.self;
++      status = data.status;
++      snapAt = performance.now();
++      render();
++    },
++    toast,
++    destroy() {
++      timers.forEach((t) => clearInterval(t));
++      document.removeEventListener('click', onDocClick);
++      document.removeEventListener('keydown', onKey);
++      playerBarButton.remove();
++      host.remove();
++    },
++  };
++}
++
++export const renderer = createRenderer<Props, PearConnectConfig>({
++  timers: [],
++
++  start(ctx) {
++    this.ctx = ctx;
++    const ui = createUi(
++      (action) =>
++        ctx.ipc.invoke('pear-connect:action', action) as Promise<ActionResult>,
++    );
++    ctx.ipc.on(
++      'pear-connect:snapshot',
++      (data: Parameters<typeof ui.update>[0]) => ui.update(data),
++    );
++    ctx.ipc.on('pear-connect:command', (cmd: Command) => {
++      this.runCommand(cmd).catch((e: unknown) => {
++        console.warn('[Pear Connect] commande en échec', e);
++        ui.toast(`Pear Connect : ${(e as Error).message}`);
++      });
++    });
++    this.teardown = () => {
++      ctx.ipc.removeAllListeners('pear-connect:snapshot');
++      ctx.ipc.removeAllListeners('pear-connect:command');
++      ui.destroy();
++    };
++    ctx.ipc.send('pear-connect:ready');
++  },
++
++  onPlayerApiReady(playerApi) {
++    this.playerApi = playerApi;
++    this.timers.push(window.setInterval(() => this.report(), 1000));
++    this.report();
++  },
++
++  stop() {
++    this.timers.forEach((t) => clearInterval(t));
++    this.timers = [];
++    this.teardown?.();
++  },
++
++  /** Lecture locale → processus principal (qui décide quoi publier). */
++  report() {
++    const api = this.playerApi;
++    if (!api || !this.ctx) return;
++    const data = api.getVideoData() as
++      | { video_id?: string; title?: string; author?: string }
++      | undefined;
++    const entries = parseQueue(queueElement()?.queue.getItems());
++    const rows = upcomingRows(entries);
++    const state = api.getPlayerState(); // -1 non démarré, 0 fini, 1 lecture, 2 pause, 3 chargement, 5 en file
++    const report: LocalReport = {
++      videoId: data?.video_id ?? '',
++      playlistId: new URL(location.href).searchParams.get('list') ?? '',
++      title: data?.title ?? '',
++      artist: data?.author ?? '',
++      position: api.getCurrentTime() || 0,
++      duration: api.getDuration() || 0,
++      paused: state !== 1 && state !== 3,
++      volume: api.isMuted() ? 0 : Math.round(api.getVolume()),
++      upcoming: rows.map((r) => r.video_id),
++      queue: rows,
++    };
++    this.ctx.ipc.send('pear-connect:local', report);
++  },
++
++  async runCommand(cmd) {
++    const receivedAt = Date.now();
++    const api = this.playerApi;
++    if (cmd.type === 'resume') return this.resume(cmd, receivedAt);
++    if (!api) throw new Error('lecteur pas encore prêt');
++    switch (cmd.type) {
++      case 'play':
++        api.playVideo();
++        return;
++      case 'pause':
++        api.pauseVideo();
++        return;
++      case 'next':
++        api.nextVideo();
++        return;
++      case 'previous':
++        api.previousVideo();
++        return;
++      case 'seek':
++        api.seekTo(Math.max(0, Number(cmd.seconds) || 0));
++        return;
++      case 'volume': {
++        const level = Math.min(100, Math.max(0, Number(cmd.level) || 0));
++        if (level > 0 && api.isMuted()) api.unMute();
++        api.setVolume(level);
++        return;
++      }
++      default:
++        break;
++    }
++    if (cmd.type === 'jump') {
++      const queue = queueElement();
++      const index = indexOfVideo(
++        parseQueue(queue?.queue.getItems()),
++        cmd.video_id,
++      );
++      if (index === null || !queue)
++        throw new Error("ce titre n'est plus dans la file");
++      queue.dispatch({ type: 'SET_INDEX', payload: index });
++    }
++  },
++
++  async resume(cmd, receivedAt) {
++    const api = this.playerApi;
++    const app = document.querySelector<MusicPlayerAppElement>('ytmusic-app');
++    if (!api || !app) throw new Error('lecteur pas encore prêt');
++    const st = cmd.state;
++    const target = () => {
++      let p = Number(st.position) || 0;
++      if (!st.paused) p += (Date.now() - receivedAt) / 1000;
++      return st.duration ? Math.min(p, Math.max(0, st.duration - 2)) : p;
++    };
++    const current = (api.getVideoData() as { video_id?: string } | undefined)
++      ?.video_id;
++    const endpoint = watchEndpoint({ ...st, position: target() });
++    const currentList = new URL(location.href).searchParams.get('list') ?? '';
++    // même titre ET même contexte : un simple recalage suffit (sinon on rouvre le mix)
++    if (
++      current !== st.video_id ||
++      (endpoint.playlistId ?? '') !== (endpoint.playlistId ? currentList : '')
++    ) {
++      // navigation interne : YouTube Music ouvre le titre dans son mix, comme un clic
++      app.dispatchEvent(
++        new CustomEvent('yt-navigate', {
++          bubbles: true,
++          composed: true,
++          detail: { endpoint: { watchEndpoint: endpoint } },
++        }),
++      );
++      const loaded = await wait(
++        () =>
++          (api.getVideoData() as { video_id?: string } | undefined)
++            ?.video_id === st.video_id && api.getDuration() > 0,
++        20_000,
++      );
++      if (!loaded) throw new Error("le titre ne s'est pas chargé");
++    }
++    if (Math.abs(api.getCurrentTime() - target()) > 2.5) api.seekTo(target());
++    if (st.paused) api.pauseVideo();
++    else api.playVideo();
++    // sans mix (venu du téléphone) : on reprend la suite de la file de la source
++    if (
++      !endpoint.playlistId &&
++      cmd.with_queue !== false &&
++      st.upcoming?.length
++    ) {
++      await this.replaceUpcoming(st.upcoming.slice(0, QUEUE_LIMIT));
++    }
++  },
++
++  async replaceUpcoming(ids) {
++    const queue = queueElement();
++    const app = document.querySelector<MusicPlayerAppElement>('ytmusic-app');
++    const store = queue?.queue.store.store;
++    if (!queue || !app || !store) return;
++    const valid = ids.filter((id) => VIDEO_ID_RE.test(id));
++    if (!valid.length) return;
++    // la file automatique de YouTube Music se remplit juste après le chargement
++    await new Promise((r) => setTimeout(r, 1500));
++    const entries = parseQueue(queue.queue.getItems());
++    const current = entries.find((e) => e.selected)?.index ?? -1;
++    if (current < 0) return;
++    const total = queue.queue.getItems().length;
++    for (let i = total - 1; i > current; i--)
++      queue.dispatch({ type: 'REMOVE_ITEM', payload: i });
++    const state = store.getState() as unknown as {
++      queue: {
++        queueContextParams: unknown;
++        items: unknown[];
++        nextQueueItemId: unknown;
++      };
++    };
++    const result = await app.networkManager.fetch('/music/get_queue', {
++      queueContextParams: state.queue.queueContextParams,
++      queueInsertPosition: 'INSERT_AT_END',
++      videoIds: valid,
++    });
++    const datas = (result as { queueDatas?: { content?: unknown }[] } | null)
++      ?.queueDatas;
++    if (!Array.isArray(datas)) return;
++    const after = store.getState() as unknown as typeof state;
++    queue.dispatch({
++      type: 'ADD_ITEMS',
++      payload: {
++        nextQueueItemId: after.queue.nextQueueItemId,
++        index: after.queue.items.length,
++        items: datas.map((d) => d?.content).filter(Boolean),
++        shuffleEnabled: false,
++        shouldAssignIds: true,
++      },
++    });
++  },
++});
+-- 
+2.43.0
+

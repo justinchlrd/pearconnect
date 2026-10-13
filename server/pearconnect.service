@@ -1,0 +1,30 @@
+# Unité systemd du serveur Pear Connect (telle que déployée dans le LXC « pearconnect »).
+#   useradd --system --home /var/lib/pearconnect --shell /usr/sbin/nologin pearconnect
+#   install -d -m 0700 -o pearconnect -g pearconnect /var/lib/pearconnect
+#   install -D -m 0755 connect_server.py /opt/pearconnect/connect_server.py
+#   install -D -m 0644 web/index.html /opt/pearconnect/web/index.html
+#   HTTPS : clé générée dans le conteneur (/etc/pearconnect/server.key, 0640 root:pearconnect),
+#   certificat signé par l'AC du homelab (/etc/pearconnect/server-chain.crt : serveur puis AC).
+#   Le port HTTP 8787 reste ouvert le temps de migrer les appareils ; ensuite : --port 0.
+#   runuser -u pearconnect -- python3 /opt/pearconnect/connect_server.py --data-dir /var/lib/pearconnect add-device <nom>
+[Unit]
+Description=Pear Connect (serveur de session YouTube Music)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pearconnect
+ExecStart=/usr/bin/python3 /opt/pearconnect/connect_server.py --data-dir /var/lib/pearconnect --bind 0.0.0.0 --port 8787 --https-port 8443 --tls-cert /etc/pearconnect/server-chain.crt --tls-key /etc/pearconnect/server.key serve
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/pearconnect
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

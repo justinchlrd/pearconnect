@@ -1,0 +1,10 @@
+# Exposition TLS du serveur Connect (Caddy obtient le certificat automatiquement).
+# Le serveur Connect écoute dans le LXC (192.168.1.168:8787) ; seul Caddy est exposé.
+pearsync.exemple.fr {
+	request_body {
+		max_size 64KB
+	}
+	reverse_proxy 192.168.1.168:8787 {
+		flush_interval -1  # flux d'événements temps réel
+	}
+}

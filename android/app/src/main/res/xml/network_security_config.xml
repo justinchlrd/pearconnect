@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  HTTPS : l'appli fait confiance aux AC du système ET à l'AC du homelab, embarquée
+  (inutile de l'installer dans Android). L'AC a des contraintes de nom : elle ne
+  limite les noms DNS à pearconnect, *.lan, *.home.arpa.
+  HTTP simple reste permis pour l'ancienne adresse :8787, le temps de migrer.
+-->
+<network-security-config xmlns:tools="http://schemas.android.com/tools">
+    <base-config cleartextTrafficPermitted="true" tools:ignore="InsecureBaseConfiguration">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/pearconnect_ca" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -1,0 +1,145 @@
+From 422c797a6d041fc1df6671c1876cdc7cb9880518 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 12 Oct 2026 21:42:25 +0200
+Subject: [PATCH 2/3] =?UTF-8?q?fix(pear-connect):=20m=C3=AAme=20file=20que?=
+ =?UTF-8?q?=20la=20source=20au=20transfert,=20reprise=20sur=20un=20Pear=20?=
+ =?UTF-8?q?tout=20juste=20lanc=C3=A9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HT9b4swJXpQ34wjMzpWviQ
+---
+ src/plugins/pear-connect/protocol.ts |  2 +-
+ src/plugins/pear-connect/renderer.ts | 61 +++++++++++++++++++---------
+ 2 files changed, 42 insertions(+), 21 deletions(-)
+
+diff --git a/src/plugins/pear-connect/protocol.ts b/src/plugins/pear-connect/protocol.ts
+index 2085c47..f8855e5 100644
+--- a/src/plugins/pear-connect/protocol.ts
++++ b/src/plugins/pear-connect/protocol.ts
+@@ -5,7 +5,7 @@
+ 
+ export const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+ const PLAYLIST_ID_RE = /^[A-Za-z0-9_-]{2,128}$/;
+-export const QUEUE_LIMIT = 25;
++export const QUEUE_LIMIT = 50;
+ 
+ export interface QueueRow {
+   video_id: string;
+diff --git a/src/plugins/pear-connect/renderer.ts b/src/plugins/pear-connect/renderer.ts
+index f8707c9..6e0d93a 100644
+--- a/src/plugins/pear-connect/renderer.ts
++++ b/src/plugins/pear-connect/renderer.ts
+@@ -124,6 +124,7 @@ type Props = Record<string, unknown> & {
+     receivedAt: number,
+   ): Promise<void>;
+   replaceUpcoming(ids: string[]): Promise<void>;
++  sameUpcoming(ids: string[]): boolean;
+ };
+ 
+ const queueElement = () => document.querySelector<QueueElement>('#queue');
+@@ -667,22 +668,28 @@ export const renderer = createRenderer<Props, PearConnectConfig>({
+   },
+ 
+   async resume(cmd, receivedAt) {
+-    const api = this.playerApi;
+     const app = document.querySelector<MusicPlayerAppElement>('ytmusic-app');
+-    if (!api || !app) throw new Error('lecteur pas encore prêt');
++    if (!app) throw new Error('YouTube Music pas encore chargé');
++    // Pear tout juste lancé, rien encore joué : le lecteur n'existe pas avant la navigation
++    const player = () =>
++      this.playerApi ??
++      (document.querySelector(
++        '#movie_player',
++      ) as unknown as MusicPlayer | null) ??
++      undefined;
++    const videoOf = (p?: MusicPlayer) =>
++      (p?.getVideoData?.() as { video_id?: string } | undefined)?.video_id;
+     const st = cmd.state;
+     const target = () => {
+       let p = Number(st.position) || 0;
+       if (!st.paused) p += (Date.now() - receivedAt) / 1000;
+       return st.duration ? Math.min(p, Math.max(0, st.duration - 2)) : p;
+     };
+-    const current = (api.getVideoData() as { video_id?: string } | undefined)
+-      ?.video_id;
+     const endpoint = watchEndpoint({ ...st, position: target() });
+     const currentList = new URL(location.href).searchParams.get('list') ?? '';
+     // même titre ET même contexte : un simple recalage suffit (sinon on rouvre le mix)
+     if (
+-      current !== st.video_id ||
++      videoOf(player()) !== st.video_id ||
+       (endpoint.playlistId ?? '') !== (endpoint.playlistId ? currentList : '')
+     ) {
+       // navigation interne : YouTube Music ouvre le titre dans son mix, comme un clic
+@@ -693,27 +700,42 @@ export const renderer = createRenderer<Props, PearConnectConfig>({
+           detail: { endpoint: { watchEndpoint: endpoint } },
+         }),
+       );
+-      const loaded = await wait(
+-        () =>
+-          (api.getVideoData() as { video_id?: string } | undefined)
+-            ?.video_id === st.video_id && api.getDuration() > 0,
+-        20_000,
+-      );
++      const loaded = await wait(() => {
++        const p = player();
++        return videoOf(p) === st.video_id && (p?.getDuration() ?? 0) > 0;
++      }, 20_000);
+       if (!loaded) throw new Error("le titre ne s'est pas chargé");
+     }
++    const api = player()!;
+     if (Math.abs(api.getCurrentTime() - target()) > 2.5) api.seekTo(target());
+     if (st.paused) api.pauseVideo();
+     else api.playVideo();
+-    // sans mix (venu du téléphone) : on reprend la suite de la file de la source
+-    if (
+-      !endpoint.playlistId &&
+-      cmd.with_queue !== false &&
+-      st.upcoming?.length
+-    ) {
+-      await this.replaceUpcoming(st.upcoming.slice(0, QUEUE_LIMIT));
++    // Même file que la source : YouTube Music régénère un mix à chaque ouverture, la suite
++    // différerait. On remplace donc les titres à venir par ceux de la source ; le mix reste le
++    // contexte de lecture et continue de se générer après eux.
++    const upcoming = (st.upcoming ?? []).slice(0, QUEUE_LIMIT);
++    if (cmd.with_queue !== false && upcoming.length) {
++      // attendre que YouTube Music ait chargé la file du mix, sinon elle écraserait la nôtre
++      await wait(
++        () => (queueElement()?.queue.getItems().length ?? 0) > 1,
++        8_000,
++      );
++      for (
++        let attempt = 0;
++        attempt < 2 && !this.sameUpcoming(upcoming);
++        attempt++
++      ) {
++        await this.replaceUpcoming(upcoming);
++        await wait(() => this.sameUpcoming(upcoming), 3_000);
++      }
+     }
+   },
+ 
++  sameUpcoming(ids) {
++    const rows = upcomingRows(parseQueue(queueElement()?.queue.getItems()));
++    return ids.every((id, i) => rows[i]?.video_id === id);
++  },
++
+   async replaceUpcoming(ids) {
+     const queue = queueElement();
+     const app = document.querySelector<MusicPlayerAppElement>('ytmusic-app');
+@@ -721,8 +743,7 @@ export const renderer = createRenderer<Props, PearConnectConfig>({
+     if (!queue || !app || !store) return;
+     const valid = ids.filter((id) => VIDEO_ID_RE.test(id));
+     if (!valid.length) return;
+-    // la file automatique de YouTube Music se remplit juste après le chargement
+-    await new Promise((r) => setTimeout(r, 1500));
++    await new Promise((r) => setTimeout(r, 500));
+     const entries = parseQueue(queue.queue.getItems());
+     const current = entries.find((e) => e.selected)?.index ?? -1;
+     if (current < 0) return;
+-- 
+2.43.0
+

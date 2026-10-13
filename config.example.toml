@@ -1,0 +1,41 @@
+# Configuration pearsync — à copier dans %APPDATA%\pearsync\config.toml
+# (ou passer -c chemin\vers\config.toml à chaque commande).
+
+# Identifiant présenté à l'API Pear lors de « pearsync auth ». Un par poste,
+# il apparaît dans la boîte de dialogue d'autorisation de Pear Desktop.
+client_id = "pearsync-bureau"
+
+# Nom de l'instance de CE poste (doit exister dans [instances]).
+local = "bureau"
+
+# Nombre de titres suivants recopiés avec la lecture (0 = titre seul).
+queue_limit = 25
+
+# --- Mode direct : instances dont l'API est joignable depuis ce poste ------
+# Laisser l'API locale en 127.0.0.1. Une instance distante n'a sa place ici
+# que si elle est joignable de façon sûre (LAN de confiance ou VPN type
+# WireGuard/Tailscale) — jamais via une redirection de port sur la box.
+[instances.bureau]
+url = "http://127.0.0.1:26538"
+
+# [instances.portable]
+# url = "http://100.64.12.34:26538"   # IP Tailscale/WireGuard du portable
+
+# --- Instance Pear de CE poste : rechargement du mix d'origine ------------
+# Quand la lecture arrive sur ce PC, pearsync ferme Pear, inscrit
+# watch?v=<titre>&list=<mix> dans sa config et le relance : YouTube Music
+# reconstruit le vrai mix, qui continue ensuite à l'infini.
+# Exige l'option Pear « Reprendre la dernière chanson quand l'application
+# démarre » (activée par défaut) ; sinon pearsync retombe sur le mode file.
+[pear_app]
+reload_mix = true
+# exe = "%LOCALAPPDATA%\\Programs\\youtube-music\\YouTube Music.exe"  # détecté automatiquement
+# config = "%APPDATA%\\YouTube Music\\config.json"                     # détecté automatiquement
+
+# --- Serveur Connect : fonctionne quel que soit le réseau de chaque PC -------
+# Chaque PC fait tourner « pearsync agent » ; seul le serveur Connect est joignable.
+[relay]
+url = "http://192.168.1.168:8787"   # HTTPS si exposé hors du réseau local
+node = "bureau"                       # nom de ce poste auprès du serveur
+token_env = "PEARSYNC_RELAY_TOKEN"    # variable d'environnement contenant le jeton
+# token = "..."                       # à défaut, en clair ici (fichier dans le profil utilisateur)

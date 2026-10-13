@@ -1,0 +1,228 @@
+# Pear Connect — installation en une commande, servie par le serveur Connect.
+#
+#   Installer ou mettre à jour :   irm http://192.168.1.168:8787/install.ps1 | iex
+#   Revenir à Pear d'origine :     irm http://192.168.1.168:8787/uninstall.ps1 | iex
+#
+# Ce que fait le script :
+#   - trouve Pear Desktop (en cours d'exécution, emplacements habituels, registre) et vérifie
+#     qu'il est en version __PEAR_VERSION__ ;
+#   - télécharge Pear + plugin (app.asar) et l'autorité de certification du homelab depuis le
+#     serveur, et vérifie leur empreinte SHA-256 (inscrite ci-dessous) ;
+#   - reprend le nom et le jeton de cet ordinateur dans l'ancienne configuration (plugin ou
+#     agent pearsync) ; ne les demande que s'il ne les trouve pas, et vérifie le jeton ;
+#   - sauvegarde app.asar d'origine, installe, configure le plugin, désactive l'ancien agent,
+#     relance Pear. Se relance en administrateur si Pear est installé dans Program Files.
+& {
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'   # sinon Windows PowerShell télécharge très lentement
+
+$Action = '__ACTION__'
+$Base = '__BASE_URL__'
+$ConnectUrl = '__CONNECT_URL__'
+$ExpectedVersion = '__PEAR_VERSION__'
+$AsarSha256 = '__ASAR_SHA256__'
+$CaSha256 = '__CA_SHA256__'
+
+function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
+function Fail($msg) { Write-Host "`n$msg" -ForegroundColor Red; throw 'Installation interrompue' }
+
+# --- Pear Desktop ------------------------------------------------------------------------------
+function Find-PearDir {
+    $p = Get-Process -Name 'YouTube Music' -ErrorAction SilentlyContinue | Where-Object Path | Select-Object -First 1
+    if ($p) { return Split-Path -Parent $p.Path }
+    $candidates = @()
+    foreach ($b in @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not $b) { continue }
+        foreach ($n in 'Programs\youtube-music', 'Programs\pear-desktop', 'YouTube Music', 'youtube-music', 'Pear Desktop') {
+            $candidates += (Join-Path $b $n)
+        }
+    }
+    foreach ($root in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                      'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                      'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*') {
+        Get-ItemProperty $root -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like '*YouTube Music*' -or $_.DisplayName -like '*Pear*' } |
+            ForEach-Object {
+                if ($_.InstallLocation) { $candidates += $_.InstallLocation.Trim('"') }
+                if ($_.DisplayIcon) { $candidates += (Split-Path -Parent ($_.DisplayIcon -replace '"|,\d+$', '')) }
+            }
+    }
+    foreach ($c in $candidates) { if ($c -and (Test-Path (Join-Path $c 'YouTube Music.exe'))) { return $c } }
+    return $null
+}
+
+function Stop-Pear {
+    if (-not (Get-Process -Name 'YouTube Music' -ErrorAction SilentlyContinue)) { return }
+    Write-Host 'Fermeture de Pear Desktop…'
+    Get-Process -Name 'YouTube Music' -ErrorAction SilentlyContinue | ForEach-Object { $_.CloseMainWindow() | Out-Null }
+    for ($i = 0; $i -lt 16 -and (Get-Process -Name 'YouTube Music' -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Milliseconds 500 }
+    # resté dans la zone de notification : arrêt forcé (sa configuration est déjà sur disque)
+    Get-Process -Name 'YouTube Music' -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Seconds 1
+}
+
+function Test-Writable($dir) {
+    try {
+        $probe = Join-Path $dir ".pearconnect-$PID"
+        [System.IO.File]::WriteAllText($probe, 'x')
+        Remove-Item $probe -Force
+        return $true
+    } catch { return $false }
+}
+
+function Restart-Elevated {
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($isAdmin) { Fail "Impossible d'écrire dans $resources, même en administrateur." }
+    Write-Host 'Pear est installé dans un dossier protégé : relance en administrateur (accepte la demande de Windows)…' -ForegroundColor Yellow
+    $script = if ($Action -eq 'uninstall') { 'uninstall.ps1' } else { 'install.ps1' }
+    Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-Command', "irm $Base/$script | iex"
+    Write-Host 'La suite se passe dans la fenêtre administrateur.'
+}
+
+# --- Configuration de Pear ---------------------------------------------------------------------
+$configFile = Join-Path $env:APPDATA 'YouTube Music\config.json'
+$dataDir = Join-Path $env:APPDATA 'pearsync'
+
+function Read-PearConfig {
+    if (-not (Test-Path $configFile)) { Fail "Configuration de Pear introuvable ($configFile) : lance Pear une fois, puis relance l'installation." }
+    return Get-Content -Raw -Encoding UTF8 $configFile | ConvertFrom-Json
+}
+function Write-PearConfig($cfg) {
+    # Windows PowerShell 5.1 : sans ceci, certains tableaux sortent en {"value": […], "Count": n}
+    Remove-TypeData -TypeName System.Array -ErrorAction SilentlyContinue
+    [System.IO.File]::WriteAllText($configFile, (ConvertTo-Json -InputObject $cfg -Depth 64), (New-Object System.Text.UTF8Encoding $false))
+}
+function Set-Member($obj, [string]$name, $value) {
+    if ($obj.PSObject.Properties[$name]) { $obj.$name = $value } else { $obj | Add-Member -NotePropertyName $name -NotePropertyValue $value }
+}
+
+# --- Nom et jeton de cet ordinateur ------------------------------------------------------------
+function Find-Identity($cfg) {
+    $p = if ($cfg.plugins) { $cfg.plugins.'pear-connect' } else { $null }
+    if ($p -and $p.token -and $p.device) { return @{ Device = $p.device; Token = $p.token; From = 'plugin Pear Connect' } }
+    $toml = Join-Path $dataDir 'config.toml'
+    if (Test-Path $toml) {
+        $text = Get-Content -Raw -Encoding UTF8 $toml
+        $relay = ($text -split '(?m)^\s*\[relay\]\s*$', 2)[1]
+        if ($relay) {
+            $relay = ($relay -split '(?m)^\s*\[')[0]
+            $tok = [regex]::Match($relay, '(?m)^\s*token\s*=\s*"([^"]+)"').Groups[1].Value
+            $node = [regex]::Match($relay, '(?m)^\s*node\s*=\s*"([^"]+)"').Groups[1].Value
+            if ($tok -and $node) { return @{ Device = $node; Token = $tok; From = 'ancien agent pearsync' } }
+        }
+    }
+    return $null
+}
+
+function Test-Token($token) {
+    try {
+        Invoke-RestMethod -Uri "$Base/v1/snapshot" -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 10 | Out-Null
+        return $true
+    } catch {
+        $code = $_.Exception.Response.StatusCode.value__
+        if ($code -eq 401) { return $false }
+        Fail "Serveur Connect injoignable ($Base) : $($_.Exception.Message)"
+    }
+}
+
+function Ask-Identity {
+    Write-Host "Nom et jeton introuvables sur cet ordinateur." -ForegroundColor Yellow
+    Write-Host "(nouvel appareil : sur le Proxmox, « pct exec 101 -- runuser -u pearconnect -- python3 /opt/pearconnect/connect_server.py --data-dir /var/lib/pearconnect add-device <nom> »)"
+    do {
+        $device = (Read-Host "Nom de cet ordinateur sur le serveur (ex. the-kernel)").Trim()
+    } until ($device -match '^[A-Za-z0-9_.-]{1,64}$')
+    $sec = Read-Host "Jeton de « $device »" -AsSecureString
+    $token = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)).Trim()
+    return @{ Device = $device; Token = $token; From = 'saisie' }
+}
+
+function Get-Verified($name, $sha256, $dest) {
+    Invoke-WebRequest -Uri "$Base/dl/$name" -OutFile $dest -UseBasicParsing -TimeoutSec 300
+    $got = (Get-FileHash -Algorithm SHA256 $dest).Hash.ToLowerInvariant()
+    if ($got -ne $sha256) { Remove-Item $dest -Force; Fail "Empreinte inattendue pour $name : téléchargement altéré ou incomplet." }
+}
+
+# === Déroulé ===================================================================================
+Step 'Pear Desktop'
+$pearDir = Find-PearDir
+if (-not $pearDir) { Fail "Pear Desktop introuvable : lance-le, puis relance l'installation." }
+$exe = Join-Path $pearDir 'YouTube Music.exe'
+$resources = Join-Path $pearDir 'resources'
+$installed = Join-Path $resources 'app.asar'
+$original = Join-Path $resources 'app.asar.original'
+Write-Host $pearDir
+if (-not (Test-Writable $resources)) { Restart-Elevated; return }
+
+if ($Action -eq 'uninstall') {
+    if (-not (Test-Path $original)) { Fail 'Pear Connect n''est pas installé (pas de sauvegarde app.asar.original).' }
+    Stop-Pear
+    Copy-Item -Force $original $installed
+    Remove-Item -Force $original
+    $cfg = Read-PearConfig
+    if ($cfg.plugins -and $cfg.plugins.'pear-connect') { $cfg.plugins.'pear-connect'.enabled = $false; Write-PearConfig $cfg }
+    if (Get-ScheduledTask -TaskName 'pearsync-agent' -ErrorAction SilentlyContinue) {
+        Enable-ScheduledTask -TaskName 'pearsync-agent' | Out-Null
+        Start-ScheduledTask -TaskName 'pearsync-agent'
+    }
+    Start-Process -FilePath $exe
+    Write-Host "`nPear Desktop d'origine restauré." -ForegroundColor Green
+    return
+}
+
+$version = (Get-Item $exe).VersionInfo.ProductVersion
+if (-not "$version".StartsWith($ExpectedVersion)) {
+    Fail "Pear Desktop $version installé : Pear Connect est construit pour la version $ExpectedVersion."
+}
+Write-Host "Version $version"
+
+Step 'Cet ordinateur'
+$cfg = Read-PearConfig
+$id = Find-Identity $cfg
+if ($id -and -not (Test-Token $id.Token)) {
+    Write-Host "Le jeton trouvé ($($id.From)) est refusé par le serveur." -ForegroundColor Yellow
+    $id = $null
+}
+while (-not $id) {
+    $id = Ask-Identity
+    if (-not (Test-Token $id.Token)) { Write-Host 'Jeton refusé par le serveur, recommence.' -ForegroundColor Yellow; $id = $null }
+}
+Write-Host "« $($id.Device) » (jeton repris : $($id.From), accepté par le serveur)"
+
+Step 'Téléchargement'
+$work = Join-Path $env:TEMP "pear-connect-$PID"
+New-Item -ItemType Directory -Force -Path $work | Out-Null
+try {
+    Get-Verified 'app-asar.zip' $AsarSha256 (Join-Path $work 'app-asar.zip')
+    Expand-Archive -Path (Join-Path $work 'app-asar.zip') -DestinationPath $work -Force
+    New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+    $caDest = Join-Path $dataDir 'pearconnect-ca.crt'
+    Get-Verified 'pearconnect-ca.crt' $CaSha256 $caDest
+    Write-Host 'Fichiers téléchargés et vérifiés (SHA-256).'
+
+    Step 'Installation'
+    Stop-Pear
+    if (-not (Test-Path $original)) { Copy-Item $installed $original; Write-Host "Sauvegarde de l'original : $original" }
+    Copy-Item -Force (Join-Path $work 'app.asar') $installed
+} finally {
+    Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+}
+
+$cfg = Read-PearConfig
+Copy-Item -Force $configFile "$configFile.pearconnect.bak"
+if (-not $cfg.PSObject.Properties['plugins']) { Set-Member $cfg 'plugins' ([pscustomobject]@{}) }
+Set-Member $cfg.plugins 'pear-connect' ([pscustomobject]@{
+    enabled = $true; server = $ConnectUrl; device = $id.Device; token = $id.Token; caPath = $caDest
+})
+Write-PearConfig $cfg
+& icacls $configFile /inheritance:r /grant:r "$($env:USERNAME):(F)" | Out-Null   # contient le jeton
+
+if (Get-ScheduledTask -TaskName 'pearsync-agent' -ErrorAction SilentlyContinue) {
+    Disable-ScheduledTask -TaskName 'pearsync-agent' | Out-Null
+    Get-Process pearsync-agent -ErrorAction SilentlyContinue | Stop-Process -Force
+    Write-Host 'Ancien agent pearsync désactivé (le plugin le remplace).'
+}
+
+Start-Process -FilePath $exe
+Write-Host "`nPear Connect installé sur « $($id.Device) ». Le bouton « appareils » est dans la barre du lecteur." -ForegroundColor Green
+}

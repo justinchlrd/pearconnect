@@ -1,0 +1,139 @@
+From 484c5ad8ffab62233a6339b96518649341b622a2 Mon Sep 17 00:00:00 2001
+From: Bridouche <bluenderbot@gmail.com>
+Date: Mon, 12 Oct 2026 19:19:39 +0200
+Subject: [PATCH] feat(jam): expose le contexte de lecture (mix) au compagnon
+ Pear Connect
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HT9b4swJXpQ34wjMzpWviQ
+---
+ .../music/patches/jam/JamBridgeService.java   |  9 ++++-
+ .../music/patches/jam/JamContext.java         | 34 +++++++++++++++++++
+ gradle.properties                             |  2 +-
+ patches/build.gradle.kts                      |  2 +-
+ .../patches/music/interaction/jam/JamPatch.kt | 11 ++++++
+ 5 files changed, 55 insertions(+), 3 deletions(-)
+ create mode 100644 extensions/music/src/main/java/app/morphe/extension/music/patches/jam/JamContext.java
+
+diff --git a/extensions/music/src/main/java/app/morphe/extension/music/patches/jam/JamBridgeService.java b/extensions/music/src/main/java/app/morphe/extension/music/patches/jam/JamBridgeService.java
+index f44df6fd1..0a75d073e 100644
+--- a/extensions/music/src/main/java/app/morphe/extension/music/patches/jam/JamBridgeService.java
++++ b/extensions/music/src/main/java/app/morphe/extension/music/patches/jam/JamBridgeService.java
+@@ -205,7 +205,14 @@ public final class JamBridgeService extends Service {
+                 .put("revision", generation + ":" + revision)
+                 .put("items", rows)
+                 .put("autoplay", suggested)
+-                .put("clock", JamClock.snapshot());
++                .put("clock", withContext(JamClock.snapshot()));
++    }
++
++    /** Pear Connect : contexte de lecture (mix…) du titre en cours, pour les autres appareils. */
++    private static JSONObject withContext(JSONObject clock) throws Exception {
++        String playlist = JamContext.playlistFor(clock.optString("videoId"));
++        if (!playlist.isEmpty()) clock.put("playlistId", playlist);
++        return clock;
+     }
+ 
+     private static JSONObject snapshot() throws Exception {
+diff --git a/extensions/music/src/main/java/app/morphe/extension/music/patches/jam/JamContext.java b/extensions/music/src/main/java/app/morphe/extension/music/patches/jam/JamContext.java
+new file mode 100644
+index 000000000..27da70ba9
+--- /dev/null
++++ b/extensions/music/src/main/java/app/morphe/extension/music/patches/jam/JamContext.java
+@@ -0,0 +1,34 @@
++/*
++ * Pear Connect : contexte de lecture (mix, playlist, album) exposé au compagnon.
++ *
++ * See the included NOTICE file for GPLv3 Section 7 terms that apply to this code.
++ */
++
++package app.morphe.extension.music.patches.jam;
++
++/**
++ * Dernier couple (titre, contexte) demandé au lecteur. Le pont Jam l'ajoute à son horloge
++ * pour que le compagnon puisse rouvrir le titre DANS son mix sur un autre appareil.
++ */
++public final class JamContext {
++
++    private static volatile String videoId = "";
++    private static volatile String playlistId = "";
++
++    private JamContext() {
++    }
++
++    /** Injected into the player parameter builder (video id, playlist id, playlist index). */
++    @SuppressWarnings("unused")
++    public static void newPlayerResponse(String video, String playlist, int playlistIndex) {
++        if (video == null || video.isEmpty()) return;
++        videoId = video;
++        playlistId = playlist == null ? "" : playlist;
++    }
++
++    /** Contexte du titre en cours, ou chaîne vide s'il est inconnu ou ne correspond pas. */
++    static String playlistFor(String video) {
++        String id = playlistId;
++        return video != null && video.equals(videoId) && id.matches("[A-Za-z0-9_-]{2,128}") ? id : "";
++    }
++}
+diff --git a/gradle.properties b/gradle.properties
+index 2a3d7ca7a..47564f34b 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -3,4 +3,4 @@ org.gradle.jvmargs = -Xms512M -Xmx2048M
+ org.gradle.parallel = true
+ android.useAndroidX = true
+ kotlin.code.style = official
+-version = 1.47.0
++version = 1.47.0-pearconnect.1
+diff --git a/patches/build.gradle.kts b/patches/build.gradle.kts
+index 831d7ff19..7c9b94e92 100644
+--- a/patches/build.gradle.kts
++++ b/patches/build.gradle.kts
+@@ -4,7 +4,7 @@ group = "app.morphe"
+ 
+ patches {
+     about {
+-        name = "Morphe Patches"
++        name = "Morphe Patches (Pear Connect)"
+         description = "Patches for Morphe"
+         source = "git@github.com:MorpheApp/morphe-patches.git"
+         author = "MorpheApp"
+diff --git a/patches/src/main/kotlin/app/morphe/patches/music/interaction/jam/JamPatch.kt b/patches/src/main/kotlin/app/morphe/patches/music/interaction/jam/JamPatch.kt
+index 5297a407f..b0df60fdc 100644
+--- a/patches/src/main/kotlin/app/morphe/patches/music/interaction/jam/JamPatch.kt
++++ b/patches/src/main/kotlin/app/morphe/patches/music/interaction/jam/JamPatch.kt
+@@ -17,6 +17,9 @@ import app.morphe.patches.music.misc.settings.settingsPatch
+ import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
+ import app.morphe.patches.music.shared.MusicActivityOnCreateFingerprint
+ import app.morphe.patches.music.video.information.musicVideoInformationPatch
++import app.morphe.patches.music.video.playerresponse.Hook
++import app.morphe.patches.music.video.playerresponse.addPlayerResponseMethodHook
++import app.morphe.patches.music.video.playerresponse.musicPlayerResponseMethodHookPatch
+ import app.morphe.patches.shared.misc.settings.preference.NonInteractivePreference
+ import app.morphe.patches.shared.misc.settings.preference.PreferenceScreenPreference
+ import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
+@@ -92,6 +95,7 @@ val jamQueueSharingPatch = bytecodePatch(
+         settingsPatch,
+         jamResources,
+         musicVideoInformationPatch,
++        musicPlayerResponseMethodHookPatch,
+         versionCheckPatch,
+     )
+     compatibleWith(COMPATIBILITY_YOUTUBE_MUSIC)
+@@ -104,6 +108,13 @@ val jamQueueSharingPatch = bytecodePatch(
+         installJamQueueBridges(queue)
+         installJamUiBridges(ui, queue)
+ 
++        // Pear Connect : contexte de lecture (mix…) ajouté à l'horloge du pont.
++        addPlayerResponseMethodHook(
++            Hook.VideoIdAndPlaylistId(
++                "Lapp/morphe/extension/music/patches/jam/JamContext;->newPlayerResponse(Ljava/lang/String;Ljava/lang/String;I)V"
++            )
++        )
++
+         MusicActivityOnCreateFingerprint.method.addInstructions(
+             0,
+             "invoke-static/range {p0 .. p0}, $EXTENSION_CLASS->install(Landroid/app/Activity;)V",
+-- 
+2.43.0
+

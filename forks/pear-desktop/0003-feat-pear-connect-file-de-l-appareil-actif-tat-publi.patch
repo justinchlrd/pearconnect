@@ -1,0 +1,393 @@
+From 84100f6f3dde3fc75663d390fc2d259eabad5b28 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 12 Oct 2026 22:16:02 +0200
+Subject: [PATCH 3/3] =?UTF-8?q?feat(pear-connect):=20file=20de=20l'apparei?=
+ =?UTF-8?q?l=20actif,=20=C3=A9tat=20publi=C3=A9=20m=C3=AAme=20sans=20rappo?=
+ =?UTF-8?q?rt=20de=20la=20page,=20journal?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HT9b4swJXpQ34wjMzpWviQ
+---
+ src/plugins/pear-connect/backend.ts  |  70 ++++++++++--
+ src/plugins/pear-connect/renderer.ts | 159 +++++++++++++++++++++++----
+ 2 files changed, 196 insertions(+), 33 deletions(-)
+
+diff --git a/src/plugins/pear-connect/backend.ts b/src/plugins/pear-connect/backend.ts
+index e2cbf94..8565159 100644
+--- a/src/plugins/pear-connect/backend.ts
++++ b/src/plugins/pear-connect/backend.ts
+@@ -4,6 +4,11 @@
+  *  - relève et exécute les commandes (long-poll) ;
+  *  - relaie le flux temps réel du serveur à la page (barre « Lecture sur … »).
+  */
++import { appendFileSync, renameSync, statSync } from 'node:fs';
++import { join } from 'node:path';
++
++import { app } from 'electron';
++
+ import { getSongControls } from '@/providers/song-controls';
+ import { registerCallback, type SongInfo } from '@/providers/song-info';
+ import { createBackend } from '@/utils';
+@@ -42,6 +47,21 @@ const HEARTBEAT = 15_000;
+ const LONG_POLL = 20;
+ const LOG = '[Pear Connect]';
+ 
++/** Journal %APPDATA%\\YouTube Music\\pear-connect.log (1 Mo, une rotation). */
++const journal = (message: string) => {
++  try {
++    const file = join(app.getPath('userData'), 'pear-connect.log');
++    try {
++      if (statSync(file).size > 1_000_000) renameSync(file, `${file}.1`);
++    } catch {
++      /* pas encore de journal */
++    }
++    appendFileSync(file, `${new Date().toISOString()} ${message}\n`);
++  } catch {
++    /* journal facultatif */
++  }
++};
++
+ const sleep = (ms: number, signal: AbortSignal) =>
+   new Promise<void>((resolve) => {
+     const t = setTimeout(resolve, ms);
+@@ -97,6 +117,13 @@ export const backend = createBackend<Props, PearConnectConfig>({
+       this.localAt = Date.now();
+     });
+     ctx.ipc.on('pear-connect:ready', () => this.pushSnapshot());
++    ctx.ipc.on('pear-connect:diag', (message: string) =>
++      journal(`page : ${message}`),
++    );
++    // position de lecture tenue à jour par Pear (repli si la page ne rapporte rien)
++    ctx.ipc.on('peard:player-api-loaded', () =>
++      ctx.ipc.send('peard:setup-time-changed-listener'),
++    );
+     ctx.ipc.handle('pear-connect:action', (action: UiAction) =>
+       this.action(action),
+     );
+@@ -132,6 +159,7 @@ export const backend = createBackend<Props, PearConnectConfig>({
+     this.commandLoop(abort.signal);
+     this.eventsLoop(abort.signal);
+     console.log(LOG, `appareil « ${config.device} » sur ${config.server}`);
++    journal(`démarrage : appareil « ${config.device} » sur ${config.server}`);
+   },
+ 
+   halt() {
+@@ -143,25 +171,42 @@ export const backend = createBackend<Props, PearConnectConfig>({
+   },
+ 
+   setStatus(status) {
+-    if (status !== this.status) console.log(LOG, status);
++    if (status !== this.status) {
++      console.log(LOG, status);
++      journal(`état : ${status}`);
++    }
+     this.status = status;
+   },
+ 
+   currentState() {
+     const local = this.local;
+-    // la page n'a rien envoyé depuis 10 s : Pear est en train de (re)charger
+-    if (!local || !local.videoId || Date.now() - this.localAt > 10_000)
+-      return null;
+-    const song = this.song?.videoId === local.videoId ? this.song : undefined;
++    const song = this.song;
++    // la page ne rapporte rien (rechargement, erreur) : repli sur les infos de titre de Pear
++    if (!local || !local.videoId || Date.now() - this.localAt > 10_000) {
++      if (!song?.videoId) return null;
++      return {
++        video_id: song.videoId,
++        position: song.elapsedSeconds ?? 0,
++        paused: song.isPaused ?? true,
++        duration: song.songDuration || 0,
++        title: song.title,
++        artist: song.artist,
++        playlist_id: cleanPlaylistId(song.playlistId),
++        upcoming: [],
++        queue: [],
++        volume: null,
++      };
++    }
++    const same = song?.videoId === local.videoId ? song : undefined;
+     return {
+       video_id: local.videoId,
+       position: local.position,
+       paused: local.paused,
+-      duration: local.duration || song?.songDuration || 0,
+-      title: song?.title || local.title,
+-      artist: song?.artist || local.artist,
++      duration: local.duration || same?.songDuration || 0,
++      title: same?.title || local.title,
++      artist: same?.artist || local.artist,
+       playlist_id:
+-        cleanPlaylistId(local.playlistId) || cleanPlaylistId(song?.playlistId),
++        cleanPlaylistId(local.playlistId) || cleanPlaylistId(same?.playlistId),
+       upcoming: local.upcoming,
+       queue: local.queue,
+       volume: local.volume,
+@@ -257,7 +302,13 @@ export const backend = createBackend<Props, PearConnectConfig>({
+       );
+       return;
+     }
++    journal(
++      `commande ${cmd.type}${'video_id' in cmd ? ` ${cmd.video_id}` : ''}`,
++    );
+     if (cmd.type === 'resume') {
++      journal(
++        `reprise ${cmd.state.video_id} mix=${cmd.state.playlist_id || '-'} file=${cmd.state.upcoming?.length ?? 0} titres`,
++      );
+       console.log(
+         LOG,
+         `reprise de ${cmd.state.video_id} (${cmd.state.playlist_id || 'sans mix'})`,
+@@ -275,6 +326,7 @@ export const backend = createBackend<Props, PearConnectConfig>({
+       if (action.op === 'hello') {
+         this.pushSnapshot();
+       } else if (action.op === 'transfer') {
++        journal(`transfert vers ${action.target}`);
+         await client.transfer(action.target);
+       } else if (action.op === 'control') {
+         const body: Record<string, unknown> = { ...action };
+diff --git a/src/plugins/pear-connect/renderer.ts b/src/plugins/pear-connect/renderer.ts
+index 6e0d93a..8348e28 100644
+--- a/src/plugins/pear-connect/renderer.ts
++++ b/src/plugins/pear-connect/renderer.ts
+@@ -46,6 +46,8 @@ const ICONS = {
+   prev: 'M6 6h2v12H6zm3.5 6l8.5 6V6z',
+   volume:
+     'M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z',
++  queue:
++    'M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z',
+   speaker:
+     'M17 2H7c-1.1 0-2 .9-2 2v16c0 1.1.9 1.99 2 1.99L17 22c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-5 2c1.1 0 2 .9 2 2s-.9 2-2 2a2 2 0 1 1 0-4zm0 16c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z',
+ } as const;
+@@ -106,6 +108,12 @@ input[type=range] { width: 96px; accent-color: ${ACCENT}; }
+ .popvol { display: flex; align-items: center; gap: 8px; margin: 8px; color: #aaa; }
+ .popvol input { flex: 1; width: auto; }
+ .empty { margin: 8px; font-size: 13px; color: #aaa; }
++.qpop { right: 340px; width: 360px; }
++.qrow { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 8px; border-radius: 6px; text-align: left; }
++.qrow:hover { background: rgba(255,255,255,.08); }
++.qart { width: 40px; height: 40px; flex: none; border-radius: 4px; background: #333 center / auto 134% no-repeat; }
++.qrow .name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
++.qrow .state { font-size: 12px; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+ .toast { position: fixed; left: 50%; bottom: calc(var(--pc-height, 72px) + 16px); transform: translateX(-50%);
+   z-index: 2002; max-width: 80vw; padding: 10px 16px; border-radius: 6px; background: #f1f1f1; color: #000;
+   font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+@@ -118,6 +126,8 @@ type Props = Record<string, unknown> & {
+   timers: number[];
+   teardown?: () => void;
+   report(): void;
++  diag(message: string): void;
++  lastDiag?: string;
+   runCommand(cmd: Command): Promise<void>;
+   resume(
+     cmd: Extract<Command, { type: 'resume' }>,
+@@ -340,6 +350,19 @@ function createUi(send: (action: UiAction) => Promise<ActionResult>) {
+       'div',
+       { class: 'right' },
+       vol,
++      h(
++        'button',
++        {
++          'class': 'round',
++          'aria-label': 'File d’attente',
++          'title': 'File d’attente de l’appareil qui joue',
++          'onclick': (ev) => {
++            ev.stopPropagation();
++            toggleQueue();
++          },
++        },
++        icon('queue', 22),
++      ),
+       devBtn,
+       h('button', {
+         class: 'here',
+@@ -373,7 +396,20 @@ function createUi(send: (action: UiAction) => Promise<ActionResult>) {
+     list,
+     popVol,
+   );
+-  root.append(bar, pop, toastEl);
++  // file d'attente de l'appareil qui joue
++  const qlist = h('div');
++  const qpop = h(
++    'div',
++    {
++      'class': 'pop qpop',
++      'role': 'dialog',
++      'aria-label': 'File d’attente',
++      'onclick': (ev) => ev.stopPropagation(),
++    },
++    h('h2', { text: 'À suivre' }),
++    qlist,
++  );
++  root.append(bar, pop, qpop, toastEl);
+ 
+   const deviceStatus = (name: string, d: DeviceView) => {
+     if (name === activeName() && d.online && d.state) {
+@@ -443,9 +479,52 @@ function createUi(send: (action: UiAction) => Promise<ActionResult>) {
+       popVolRange.value = String(st.volume);
+   }
+ 
+-  const hidePopover = () => pop.classList.remove('show');
++  function renderQueue() {
++    qlist.replaceChildren();
++    const st = activeState();
++    const rows = st?.queue ?? [];
++    if (!rows.length) {
++      qlist.append(h('p', { class: 'empty', text: 'File vide (ou inconnue)' }));
++      return;
++    }
++    for (const row of rows) {
++      const qart = h('div', { class: 'qart' });
++      if (VIDEO_ID_RE.test(row.video_id)) {
++        qart.style.backgroundImage = `url("https://i.ytimg.com/vi/${row.video_id}/hqdefault.jpg")`;
++      }
++      qlist.append(
++        h(
++          'button',
++          {
++            class: 'qrow',
++            onclick: () => {
++              act({ op: 'control', action: 'jump', video_id: row.video_id });
++            },
++          },
++          qart,
++          h(
++            'div',
++            { style: 'min-width:0' },
++            h('div', { class: 'name', text: row.title || row.video_id }),
++            h('div', { class: 'state', text: row.artist }),
++          ),
++        ),
++      );
++    }
++  }
++  function toggleQueue() {
++    if (qpop.classList.contains('show')) return qpop.classList.remove('show');
++    pop.classList.remove('show');
++    renderQueue();
++    qpop.classList.add('show');
++  }
++  const hidePopover = () => {
++    pop.classList.remove('show');
++    qpop.classList.remove('show');
++  };
+   function togglePopover() {
+     if (pop.classList.contains('show')) return hidePopover();
++    qpop.classList.remove('show');
+     renderList();
+     pop.classList.add('show');
+     send({ op: 'hello' });
+@@ -535,6 +614,10 @@ function createUi(send: (action: UiAction) => Promise<ActionResult>) {
+       tick();
+     }
+     if (pop.classList.contains('show')) renderList();
++    if (qpop.classList.contains('show')) {
++      if (remoteActive()) renderQueue();
++      else qpop.classList.remove('show');
++    }
+   }
+ 
+   const timers = [
+@@ -577,6 +660,7 @@ export const renderer = createRenderer<Props, PearConnectConfig>({
+     ctx.ipc.on('pear-connect:command', (cmd: Command) => {
+       this.runCommand(cmd).catch((e: unknown) => {
+         console.warn('[Pear Connect] commande en échec', e);
++        this.diag(`commande ${cmd.type} : ${(e as Error).message}`);
+         ui.toast(`Pear Connect : ${(e as Error).message}`);
+       });
+     });
+@@ -586,11 +670,12 @@ export const renderer = createRenderer<Props, PearConnectConfig>({
+       ui.destroy();
+     };
+     ctx.ipc.send('pear-connect:ready');
++    // indépendant de onPlayerApiReady : le lecteur peut exister avant le plugin, ou après
++    this.timers.push(window.setInterval(() => this.report(), 1000));
+   },
+ 
+   onPlayerApiReady(playerApi) {
+     this.playerApi = playerApi;
+-    this.timers.push(window.setInterval(() => this.report(), 1000));
+     this.report();
+   },
+ 
+@@ -602,27 +687,53 @@ export const renderer = createRenderer<Props, PearConnectConfig>({
+ 
+   /** Lecture locale → processus principal (qui décide quoi publier). */
+   report() {
+-    const api = this.playerApi;
+-    if (!api || !this.ctx) return;
+-    const data = api.getVideoData() as
+-      | { video_id?: string; title?: string; author?: string }
+-      | undefined;
+-    const entries = parseQueue(queueElement()?.queue.getItems());
+-    const rows = upcomingRows(entries);
+-    const state = api.getPlayerState(); // -1 non démarré, 0 fini, 1 lecture, 2 pause, 3 chargement, 5 en file
+-    const report: LocalReport = {
+-      videoId: data?.video_id ?? '',
+-      playlistId: new URL(location.href).searchParams.get('list') ?? '',
+-      title: data?.title ?? '',
+-      artist: data?.author ?? '',
+-      position: api.getCurrentTime() || 0,
+-      duration: api.getDuration() || 0,
+-      paused: state !== 1 && state !== 3,
+-      volume: api.isMuted() ? 0 : Math.round(api.getVolume()),
+-      upcoming: rows.map((r) => r.video_id),
+-      queue: rows,
+-    };
+-    this.ctx.ipc.send('pear-connect:local', report);
++    if (!this.ctx) return;
++    const api =
++      this.playerApi ??
++      (document.querySelector(
++        '#movie_player',
++      ) as unknown as MusicPlayer | null);
++    if (!api?.getVideoData) return;
++    try {
++      const data = api.getVideoData() as
++        | { video_id?: string; title?: string; author?: string }
++        | undefined;
++      let rows: ReturnType<typeof upcomingRows> = [];
++      try {
++        rows = upcomingRows(parseQueue(queueElement()?.queue.getItems()));
++      } catch (e) {
++        this.diag(`lecture de la file : ${(e as Error).message}`);
++      }
++      const state = api.getPlayerState(); // -1 non démarré, 0 fini, 1 lecture, 2 pause, 3 chargement
++      let volume: number | null = null;
++      try {
++        volume = api.isMuted() ? 0 : Math.round(api.getVolume());
++      } catch {
++        volume = null;
++      }
++      const report: LocalReport = {
++        videoId: data?.video_id ?? '',
++        playlistId: new URL(location.href).searchParams.get('list') ?? '',
++        title: data?.title ?? '',
++        artist: data?.author ?? '',
++        position: api.getCurrentTime() || 0,
++        duration: api.getDuration() || 0,
++        paused: state !== 1 && state !== 3,
++        volume,
++        upcoming: rows.map((r) => r.video_id),
++        queue: rows,
++      };
++      this.ctx.ipc.send('pear-connect:local', report);
++    } catch (e) {
++      this.diag(`lecture de l'état : ${(e as Error).message}`);
++    }
++  },
++
++  diag(message) {
++    if (this.lastDiag === message) return;
++    this.lastDiag = message;
++    console.warn('[Pear Connect]', message);
++    this.ctx?.ipc.send('pear-connect:diag', message);
+   },
+ 
+   async runCommand(cmd) {
+-- 
+2.43.0
+
