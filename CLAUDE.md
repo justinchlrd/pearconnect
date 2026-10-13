@@ -153,7 +153,8 @@ CLI `pearsync` (`status/pull/push/transfer/link/auth/agent`) et agent qui passe 
     - installeur Linux (`install.sh`/`uninstall.sh`) servi par le serveur ;
     - chaîne de build Windows/Linux sans conteneur (`tools/build_asar.py`, `tools/deploy_*.sh`) ;
     - dépôt git initialisé ; patches régénérés (4) ;
-    - version du plugin affichée en tête du menu ; vérification de mise à jour plugin + Android via `versions.json`.
+    - version du plugin affichée en tête du menu ; vérification de mise à jour plugin + Android via `versions.json` ;
+    - dépôt GitHub privé `justinchlrd/pearconnect` (historique réécrit sans binaires), **Release `v12`** avec asar, installeurs, `versions.json`, AC et APK 0.4.0 ; README réécrit pour un lecteur extérieur (le dépôt va être partagé à un collègue).
     - Constat P0 : **the_core était resté en v10** (asar du 12/10 19:41 UTC, sans journal) ; v12 y a été installée à la main le 13/10 vers 11:25 (sauvegarde `app.asar.v10`).
 
 ## 5. Tâches restantes (priorisées)
