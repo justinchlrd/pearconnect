@@ -1,5 +1,7 @@
 package app.morphe.jam.companion;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -175,9 +177,95 @@ final class Mapping {
                 if (!VIDEO_ID.matcher(target).matches()) return null;
                 return request(cmd.optBoolean("next") ? "PLAY_NEXT" : "ADD").put("videoId", target);
             }
+            case "remove":
+            case "move": {
+                // édition de « à suivre » demandée par un autre appareil ; le pont exige la révision
+                // de l'instantané (il refuse une édition sur une file qui a changé entre-temps)
+                if (snapshot == null) return null;
+                QueueRef from = upcomingAt(snapshot, cmd.optString("video_id", ""), cmd.optInt("index", -1));
+                if (from == null) return null;
+                JSONObject req = request("move".equals(type) ? "MOVE" : "REMOVE")
+                    .put("revision", snapshot.optString("revision", ""))
+                    .put("lane", from.lane)
+                    .put("item", from.id);
+                if ("move".equals(type)) {
+                    QueueRef target = upcomingTarget(snapshot, from.lane, cmd.optInt("to", 0));
+                    if (target == null) return null;
+                    req.put("target", target.id);
+                }
+                return req;
+            }
             default:
                 return null;
         }
+    }
+
+    /** Ligne de la file du pont : voie (0 = file, 1 = suggestions), identifiant stable et titre. */
+    static final class QueueRef {
+        final int lane;
+        final String id;
+        final String videoId;
+
+        QueueRef(int lane, String id, String videoId) {
+            this.lane = lane;
+            this.id = id;
+            this.videoId = videoId;
+        }
+    }
+
+    /** « À suivre » tel que publié : suite de la file après le titre en cours, puis suggestions. */
+    static List<QueueRef> upcomingRefs(JSONObject snapshot) {
+        List<QueueRef> out = new ArrayList<>();
+        boolean after = false;
+        for (int lane = 0; lane <= 1; lane++) {
+            JSONArray rows = snapshot.optJSONArray(lane == 0 ? "items" : "autoplay");
+            if (rows == null) continue;
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject item = rows.optJSONObject(i);
+                if (item == null) continue;
+                if (lane == 0 && item.optBoolean("current")) {
+                    after = true;
+                    continue;
+                }
+                String v = item.optString("videoId", "");
+                if ((lane == 1 || after) && VIDEO_ID.matcher(v).matches()) {
+                    out.add(new QueueRef(lane, item.optString("id"), v));
+                }
+            }
+        }
+        return out;
+    }
+
+    /** Ligne « à suivre » de ce titre : le rang `index` s'il le désigne bien, sinon sa première occurrence. */
+    static QueueRef upcomingAt(JSONObject snapshot, String videoId, int index) {
+        List<QueueRef> refs = upcomingRefs(snapshot);
+        if (index >= 0 && index < refs.size() && refs.get(index).videoId.equals(videoId)) return refs.get(index);
+        for (QueueRef r : refs) if (r.videoId.equals(videoId)) return r;
+        return null;
+    }
+
+    /** Ligne au rang `to` de « à suivre », ramenée dans la voie `lane` (le pont ne déplace pas entre voies). */
+    static QueueRef upcomingTarget(JSONObject snapshot, int lane, int to) {
+        List<QueueRef> refs = upcomingRefs(snapshot);
+        if (refs.isEmpty()) return null;
+        QueueRef wanted = refs.get(Math.max(0, Math.min(refs.size() - 1, to)));
+        if (wanted.lane == lane) return wanted;
+        QueueRef first = null;
+        QueueRef last = null;
+        for (QueueRef r : refs) {
+            if (r.lane != lane) continue;
+            if (first == null) first = r;
+            last = r;
+        }
+        return wanted.lane < lane ? first : last;
+    }
+
+    private static int indexOfItem(JSONArray rows, String id) {
+        if (id == null || id.isEmpty()) return -1;
+        for (int i = 0; i < rows.length(); i++) {
+            if (id.equals(rows.optJSONObject(i).optString("id"))) return i;
+        }
+        return -1;
     }
 
     /** Élément de la file (ou des suggestions) correspondant à ce titre, hors titre en cours. */
@@ -349,6 +437,25 @@ final class Mapping {
                 if (!VIDEO_ID.matcher(video).matches()) return null;
                 return new JSONObject().put("action", "enqueue").put("video_id", video)
                     .put("next", "PLAY_NEXT".equals(op));
+            case "REMOVE":
+            case "MOVE": {
+                // YouTube Music désigne les lignes par les identifiants de notre vue participant
+                // (titre en cours en tête) ; le serveur raisonne en rangs de « à suivre ».
+                if (remoteState == null) return null;
+                JSONArray rows = participantItems(remoteState);
+                int from = indexOfItem(rows, request.optString("item"));
+                if (from < 1) return null; // titre en cours, ou ligne inconnue
+                JSONObject control = new JSONObject()
+                    .put("action", "MOVE".equals(op) ? "move" : "remove")
+                    .put("video_id", rows.getJSONObject(from).getString("videoId"))
+                    .put("index", from - 1);
+                if ("MOVE".equals(op)) {
+                    int to = indexOfItem(rows, request.optString("target"));
+                    if (to < 0) return null;
+                    control.put("to", Math.max(0, to - 1));
+                }
+                return control;
+            }
             default:
                 return null;
         }

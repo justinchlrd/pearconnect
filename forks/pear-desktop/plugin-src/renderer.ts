@@ -19,8 +19,10 @@ import {
   QUEUE_LIMIT,
   VIDEO_ID_RE,
   indexOfVideo,
+  locateUpcoming,
   parseQueue,
   upcomingRows,
+  upcomingTarget,
   watchEndpoint,
 } from './protocol';
 
@@ -50,6 +52,10 @@ const ICONS = {
     'M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z',
   speaker:
     'M17 2H7c-1.1 0-2 .9-2 2v16c0 1.1.9 1.99 2 1.99L17 22c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-5 2c1.1 0 2 .9 2 2s-.9 2-2 2a2 2 0 1 1 0-4zm0 16c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z',
+  up: 'M7 14l5-5 5 5z',
+  down: 'M7 10l5 5 5-5z',
+  close:
+    'M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z',
 } as const;
 type IconName = keyof typeof ICONS;
 const KIND_ICON: Record<string, IconName> = {
@@ -109,8 +115,12 @@ input[type=range] { width: 96px; accent-color: ${ACCENT}; }
 .popvol input { flex: 1; width: auto; }
 .empty { margin: 8px; font-size: 13px; color: #aaa; }
 .qpop { right: 340px; width: 360px; }
-.qrow { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 8px; border-radius: 6px; text-align: left; }
-.qrow:hover { background: rgba(255,255,255,.08); }
+.qrow { display: flex; align-items: center; gap: 2px; width: 100%; }
+.qmain { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; padding: 6px 8px; border-radius: 6px; text-align: left; }
+.qmain:hover { background: rgba(255,255,255,.08); }
+.qctl { width: 28px; height: 28px; flex: none; display: grid; place-items: center; border-radius: 50%; color: #aaa; }
+.qctl:hover:not([disabled]) { background: rgba(255,255,255,.1); color: #fff; }
+.qctl[disabled] { opacity: .3; cursor: default; }
 .qart { width: 40px; height: 40px; flex: none; border-radius: 4px; background: #333 center / auto 134% no-repeat; }
 .qrow .name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .qrow .state { font-size: 12px; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -487,30 +497,77 @@ function createUi(send: (action: UiAction) => Promise<ActionResult>) {
       qlist.append(h('p', { class: 'empty', text: 'File vide (ou inconnue)' }));
       return;
     }
-    for (const row of rows) {
+    // rang dans « à suivre » (0 = juste après le titre en cours) : départage les doublons
+    const edit = (
+      name: IconName,
+      label: string,
+      disabled: boolean,
+      action: UiAction,
+    ) => {
+      const b = h(
+        'button',
+        {
+          'class': 'qctl',
+          'aria-label': label,
+          'title': label,
+          'onclick': () => act(action),
+        },
+        icon(name, 18),
+      );
+      if (disabled) b.setAttribute('disabled', '');
+      return b;
+    };
+    rows.forEach((row, i) => {
       const qart = h('div', { class: 'qart' });
       if (VIDEO_ID_RE.test(row.video_id)) {
         qart.style.backgroundImage = `url("https://i.ytimg.com/vi/${row.video_id}/hqdefault.jpg")`;
       }
+      const label = row.title || row.video_id;
+      const video_id = row.video_id;
       qlist.append(
         h(
-          'button',
-          {
-            class: 'qrow',
-            onclick: () => {
-              act({ op: 'control', action: 'jump', video_id: row.video_id });
-            },
-          },
-          qart,
+          'div',
+          { class: 'qrow' },
           h(
-            'div',
-            { style: 'min-width:0' },
-            h('div', { class: 'name', text: row.title || row.video_id }),
-            h('div', { class: 'state', text: row.artist }),
+            'button',
+            {
+              'class': 'qmain',
+              'aria-label': `Jouer ${label}`,
+              'onclick': () => {
+                act({ op: 'control', action: 'jump', video_id });
+              },
+            },
+            qart,
+            h(
+              'div',
+              { style: 'min-width:0' },
+              h('div', { class: 'name', text: label }),
+              h('div', { class: 'state', text: row.artist }),
+            ),
           ),
+          edit('up', 'Monter', i === 0, {
+            op: 'control',
+            action: 'move',
+            video_id,
+            index: i,
+            to: i - 1,
+          }),
+          edit('down', 'Descendre', i === rows.length - 1, {
+            op: 'control',
+            action: 'move',
+            video_id,
+            index: i,
+            to: i + 1,
+          }),
+          edit('close', 'Retirer de la file', false, {
+            op: 'control',
+            action: 'remove',
+            video_id,
+            index: i,
+          }),
         ),
       );
-    }
+    });
   }
   function toggleQueue() {
     if (qpop.classList.contains('show')) return qpop.classList.remove('show');
@@ -766,15 +823,31 @@ export const renderer = createRenderer<Props, PearConnectConfig>({
       default:
         break;
     }
+    const queue = queueElement();
+    const entries = parseQueue(queue?.queue.getItems());
     if (cmd.type === 'jump') {
-      const queue = queueElement();
-      const index = indexOfVideo(
-        parseQueue(queue?.queue.getItems()),
-        cmd.video_id,
-      );
+      const index = indexOfVideo(entries, cmd.video_id);
       if (index === null || !queue)
         throw new Error("ce titre n'est plus dans la file");
       queue.dispatch({ type: 'SET_INDEX', payload: index });
+      return;
+    }
+    if (cmd.type === 'remove' || cmd.type === 'move') {
+      // édition à distance de « à suivre » (télécommande, autre PC, téléphone)
+      const from = locateUpcoming(entries, cmd.video_id, cmd.index);
+      if (from === null || !queue)
+        throw new Error("ce titre n'est plus dans la file");
+      if (cmd.type === 'remove') {
+        queue.dispatch({ type: 'REMOVE_ITEM', payload: from });
+        return;
+      }
+      const to = upcomingTarget(entries, cmd.to);
+      if (to !== from) {
+        queue.dispatch({
+          type: 'MOVE_ITEM',
+          payload: { fromIndex: from, toIndex: to },
+        });
+      }
     }
   },
 

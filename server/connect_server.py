@@ -20,8 +20,9 @@ API (sauf « / » et /healthz, tout exige « Authorization: Bearer <jeton> ») :
   GET  /v1/events                          flux text/event-stream (snapshot à chaque changement)
   PUT  /v1/devices/<nom>/state             {"kind", "state"}            (jeton de <nom>)
   POST /v1/devices/<nom>/commands/take?wait=N  -> {"commands": [...]}   (jeton de <nom>)
-  POST /v1/devices/<nom>/commands          {"type": pause|play|next|previous|seek|volume|jump|enqueue|resume, ...}
-  POST /v1/control                         {"action": idem sauf resume, "seconds"?, "level"?, "video_id"?, "next"?}
+  POST /v1/devices/<nom>/commands          {"type": pause|play|next|previous|seek|volume|jump|enqueue|remove|move|resume, ...}
+  POST /v1/control                         {"action": idem sauf resume, "seconds"?, "level"?, "video_id"?, "next"?,
+                                            "index"? (remove/move : rang dans « à suivre »), "to"? (move : rang cible)}
   POST /v1/transfer                        {"target", "source"?, "with_queue"?}
 
 Gestion des jetons :
@@ -58,7 +59,8 @@ MAX_WAIT = 25.0  # s : durée maximale d'un long-poll
 EVENT_KEEPALIVE = 20.0  # s
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 KINDS = {"pear", "android", "web", "other"}
-CONTROL_ACTIONS = {"pause", "play", "next", "previous", "seek", "volume", "jump", "enqueue"}
+CONTROL_ACTIONS = {"pause", "play", "next", "previous", "seek", "volume", "jump", "enqueue", "remove", "move"}
+MAX_QUEUE_INDEX = 1000  # rang dans « à suivre » (remove/move) : borne de validation
 DEVICE_COMMANDS = CONTROL_ACTIONS | {"resume"}
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 MAX_QUEUE_VIEW = 50
@@ -89,15 +91,34 @@ def clean_command(kind: Any, body: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(level, int | float) or isinstance(level, bool):
             raise ValueError("level invalide")
         return {"type": "volume", "level": int(min(100, max(0, level)))}
-    if kind in ("jump", "enqueue"):
+    if kind in ("jump", "enqueue", "remove", "move"):
         vid = body.get("video_id")
         if not isinstance(vid, str) or not VIDEO_ID_RE.match(vid):
             raise ValueError("video_id invalide")
         cmd: dict[str, Any] = {"type": kind, "video_id": vid}
         if kind == "enqueue":
             cmd["next"] = bool(body.get("next"))
+        if kind in ("remove", "move"):
+            # rang (0 = juste après le titre en cours) : départage les doublons dans la file
+            index = _queue_index(body.get("index"))
+            if index is not None:
+                cmd["index"] = index
+        if kind == "move":
+            to = _queue_index(body.get("to"))
+            if to is None:
+                raise ValueError("to invalide")
+            cmd["to"] = to
         return cmd
     return {"type": kind}
+
+
+def _queue_index(value: Any) -> int | None:
+    """Rang dans « à suivre », ou None s'il n'est pas fourni."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 0 <= value <= MAX_QUEUE_INDEX:
+        raise ValueError("rang invalide")
+    return int(value)
 
 
 def _text(value: Any, limit: int = 200) -> str:

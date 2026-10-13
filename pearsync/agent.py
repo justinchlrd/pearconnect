@@ -77,6 +77,8 @@ class Agent:
         elif kind == "enqueue":
             self.local.add_to_queue(str(cmd.get("video_id") or ""), after_current=bool(cmd.get("next")))
             self._queue_at = 0.0  # relire la file au prochain tour
+        elif kind in ("remove", "move"):
+            self._edit_queue(kind, str(cmd.get("video_id") or ""), cmd.get("index"), cmd.get("to"))
         elif kind == "resume":
             state = PlaybackState.from_dict(cmd.get("state") or {})
             log.info("reprise : %s — %s à %.0f s", state.artist, state.title, state.position_now())
@@ -100,6 +102,26 @@ class Agent:
         if idx is None:
             raise HandoffError("ce titre n'est plus dans la file")
         self.local.set_queue_index(idx)
+        self._queue_at = 0.0
+
+    def _edit_queue(self, kind: str, video_id: str, index: Any, to: Any) -> None:
+        """Supprime ou déplace un titre « à suivre » (rangs comptés après le titre en cours)."""
+        q = self.local.queue()
+        entries = parse_queue(q)
+        sel = next((e.index for e in entries if e.selected), -1)
+        idx: int | None = None
+        if isinstance(index, int):  # rang indiqué par l'appelant : on le prend s'il désigne bien ce titre
+            cand = sel + 1 + index
+            if any(e.index == cand and e.video_id == video_id for e in entries):
+                idx = cand
+        if idx is None:
+            idx = queue_index_of(q, video_id, after=sel)
+        if idx is None:
+            raise HandoffError("ce titre n'est plus dans la file")
+        if kind == "remove":
+            self.local.remove_from_queue(idx)
+        else:
+            self.local.move_in_queue(idx, sel + 1 + max(0, int(to or 0)))
         self._queue_at = 0.0
 
     def _capture(self) -> PlaybackState | None:

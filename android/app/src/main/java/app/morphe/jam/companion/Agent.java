@@ -219,17 +219,27 @@ final class Agent {
                 if (state != null) resume(state, SystemClock.elapsedRealtime());
                 return;
             }
+            String type = cmd.optString("type");
+            boolean queueEdit = "remove".equals(type) || "move".equals(type);
             JSONObject snapshot;
             synchronized (this) {
                 snapshot = lastSnapshot;
             }
-            if (snapshot == null) snapshot = bridge.snapshot();
+            // édition de la file : le pont exige la révision courante, on relit l'instantané
+            if (snapshot == null || queueEdit) snapshot = bridge.snapshot();
             JSONObject request = Mapping.bridgeCommand(cmd, snapshot);
             if (request == null) {
-                Log.w(TAG, "commande ignorée (rien en lecture ?) : " + cmd.optString("type"));
+                Log.w(TAG, "commande ignorée (rien en lecture ?) : " + type);
                 return;
             }
-            bridge.call(request);
+            try {
+                bridge.call(request);
+            } catch (MusicBridge.BridgeException e) {
+                // la file a bougé entre l'instantané et l'édition : une seconde tentative suffit
+                if (!queueEdit || e.getMessage() == null || !e.getMessage().contains("Queue changed")) throw e;
+                request = Mapping.bridgeCommand(cmd, bridge.snapshot());
+                if (request != null) bridge.call(request);
+            }
         } catch (MusicBridge.BridgeException | JSONException e) {
             Log.w(TAG, "commande " + cmd.optString("type") + " en échec : " + e.getMessage());
         }

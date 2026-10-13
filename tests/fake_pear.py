@@ -179,6 +179,18 @@ class FakePear:
                     if route == ("PATCH", "/queue"):
                         fake._switch(int(body["index"]))
                         return self._reply(204)
+                    if self.command == "PATCH" and (m := re.fullmatch(r"/queue/(\d+)", route[1])):
+                        i, to = int(m.group(1)), int(body["toIndex"])
+                        if i < len(fake.queue) and 0 <= to < len(fake.queue) and i != to:
+                            vid = fake.queue.pop(i)
+                            fake.queue.insert(to, vid)
+                            if i == fake.selected:
+                                fake.selected = to
+                            elif i < fake.selected <= to:
+                                fake.selected -= 1
+                            elif to <= fake.selected < i:
+                                fake.selected += 1
+                        return self._reply(204)
                     if self.command == "DELETE" and (m := re.fullmatch(r"/queue/(\d+)", route[1])):
                         i = int(m.group(1))
                         if i < len(fake.queue) and i != fake.selected:

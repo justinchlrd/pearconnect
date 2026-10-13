@@ -171,3 +171,6 @@ class PearClient:
 
     def remove_from_queue(self, index: int) -> None:
         self._request("DELETE", f"{API}/queue/{int(index)}")
+
+    def move_in_queue(self, index: int, to_index: int) -> None:
+        self._request("PATCH", f"{API}/queue/{int(index)}", {"toIndex": int(to_index)})

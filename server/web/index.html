@@ -55,9 +55,14 @@
   .volume svg { width: 22px; height: 22px; flex: none; }
   .volume input { padding: 0; border: 0; background: none; accent-color: var(--accent); }
   .queue { display: grid; gap: 2px; }
-  .queue button { display: grid; grid-template-columns: 40px 1fr; gap: 12px; align-items: center; text-align: left;
-    padding: 6px; border-radius: 10px; }
-  .queue button:hover { background: var(--surface); }
+  .queue .qrow { display: flex; align-items: center; gap: 2px; }
+  .queue .qmain { display: grid; grid-template-columns: 40px 1fr; gap: 12px; align-items: center; text-align: left;
+    flex: 1; min-width: 0; padding: 6px; border-radius: 10px; }
+  .queue .qmain:hover { background: var(--surface); }
+  .queue .qctl { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border-radius: 50%; color: var(--muted); }
+  .queue .qctl svg { width: 22px; height: 22px; }
+  .queue .qctl:hover:not(:disabled) { background: var(--surface); color: var(--text); }
+  .queue .qctl:disabled { opacity: .25; }
   .queue .qa { width: 40px; height: 40px; border-radius: 6px; background: var(--surface-2) center / auto 134% no-repeat; }
   .queue .qt { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .queue .qs { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -228,8 +233,18 @@ function renderQueue(st, online) {
   const rows = (online && st?.queue) || [];
   $("queueBox").hidden = !rows.length;
   const box = $("queue"); box.replaceChildren();
-  for (const row of rows.slice(0, 25)) {
-    const b = document.createElement("button");
+  const shown = rows.slice(0, 25);
+  // rang dans « à suivre » (0 = juste après le titre en cours) : départage les doublons côté appareil
+  const edit = (path, label, disabled, action, extra) => {
+    const b = document.createElement("button"); b.className = "qctl"; b.disabled = disabled;
+    b.setAttribute("aria-label", label); b.title = label;
+    b.innerHTML = `<svg viewBox="0 0 24 24"><path d="${path}"/></svg>`;
+    b.addEventListener("click", () => control(action, extra));
+    return b;
+  };
+  shown.forEach((row, i) => {
+    const line = document.createElement("div"); line.className = "qrow";
+    const b = document.createElement("button"); b.className = "qmain";
     const a = document.createElement("div"); a.className = "qa";
     if (/^[\w-]{11}$/.test(row.video_id)) a.style.backgroundImage = `url("https://i.ytimg.com/vi/${row.video_id}/hqdefault.jpg")`;
     const info = document.createElement("div"); info.style.minWidth = "0";
@@ -238,8 +253,13 @@ function renderQueue(st, online) {
     info.append(t, s2); b.append(a, info);
     b.setAttribute("aria-label", `Jouer ${row.title || row.video_id}`);
     b.addEventListener("click", () => control("jump", { video_id: row.video_id }));
-    box.append(b);
-  }
+    line.append(b,
+      edit("M7 14l5-5 5 5z", "Monter", i === 0, "move", { video_id: row.video_id, index: i, to: i - 1 }),
+      edit("M7 10l5 5 5-5z", "Descendre", i === rows.length - 1, "move", { video_id: row.video_id, index: i, to: i + 1 }),
+      edit("M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
+        "Retirer de la file", false, "remove", { video_id: row.video_id, index: i }));
+    box.append(line);
+  });
 }
 
 function tick() {

@@ -184,6 +184,49 @@ public class MappingTest {
     }
 
     @Test
+    public void removeAndMoveOnThePhoneUseBridgeIdsAndRevision() throws Exception {
+        // « à suivre » du téléphone : c (items, rang 0) puis d (autoplay, rang 1)
+        JSONObject rm = Mapping.bridgeCommand(new JSONObject().put("type", "remove").put("video_id", "ccccccccccc").put("index", 0), snapshot(true));
+        assertEquals("REMOVE", rm.getString("op"));
+        assertEquals("g:1", rm.getString("revision"));
+        assertEquals(0, rm.getInt("lane"));
+        assertEquals("13", rm.getString("item"));
+        // rang périmé : première occurrence du titre, dans la voie des suggestions
+        JSONObject rm2 = Mapping.bridgeCommand(new JSONObject().put("type", "remove").put("video_id", "ddddddddddd").put("index", 7), snapshot(true));
+        assertEquals(1, rm2.getInt("lane"));
+        assertEquals("21", rm2.getString("item"));
+        // déplacement : cible ramenée dans la voie de départ (le pont ne déplace pas entre voies)
+        JSONObject mv = Mapping.bridgeCommand(new JSONObject().put("type", "move").put("video_id", "ccccccccccc").put("index", 0).put("to", 1), snapshot(true));
+        assertEquals("MOVE", mv.getString("op"));
+        assertEquals("13", mv.getString("item"));
+        assertEquals("13", mv.getString("target"));
+        assertNull(Mapping.bridgeCommand(new JSONObject().put("type", "remove").put("video_id", "zzzzzzzzzzz"), snapshot(true)));
+        assertNull("le titre en cours ne se retire pas",
+            Mapping.bridgeCommand(new JSONObject().put("type", "remove").put("video_id", "bbbbbbbbbbb"), snapshot(true)));
+        assertNull(Mapping.bridgeCommand(new JSONObject().put("type", "move").put("video_id", "ccccccccccc").put("to", 0), null));
+    }
+
+    @Test
+    public void participantRemoveAndMoveBecomeServerControls() throws Exception {
+        JSONObject st = serverSnapshot("the-kernel", true).getJSONObject("devices").getJSONObject("the-kernel").getJSONObject("state");
+        JSONArray rows = Mapping.participantItems(st); // Control (en cours), Maniac, Control
+        String maniac = rows.getJSONObject(1).getString("id");
+        String control2 = rows.getJSONObject(2).getString("id");
+        JSONObject rm = Mapping.controlForJamOp(new JSONObject().put("op", "REMOVE").put("item", control2).put("lane", 0), st);
+        assertEquals("remove", rm.getString("action"));
+        assertEquals("eeeeeeeeeee", rm.getString("video_id"));
+        assertEquals(1, rm.getInt("index"));
+        JSONObject mv = Mapping.controlForJamOp(new JSONObject().put("op", "MOVE").put("item", control2).put("target", maniac), st);
+        assertEquals("move", mv.getString("action"));
+        assertEquals(1, mv.getInt("index"));
+        assertEquals(0, mv.getInt("to"));
+        assertNull("le titre en cours ne se retire pas",
+            Mapping.controlForJamOp(new JSONObject().put("op", "REMOVE").put("item", rows.getJSONObject(0).getString("id")), st));
+        assertNull(Mapping.controlForJamOp(new JSONObject().put("op", "MOVE").put("item", maniac).put("target", "inconnu"), st));
+        assertNull(Mapping.controlForJamOp(new JSONObject().put("op", "REMOVE").put("item", maniac), null));
+    }
+
+    @Test
     public void phoneQueueCarriesTitlesForOtherDevices() throws Exception {
         JSONObject s = Mapping.stateFromSnapshot(snapshot(true));
         JSONArray q = s.getJSONArray("queue");

@@ -326,6 +326,33 @@ class ConnectServer(unittest.TestCase):
         self.assertEqual(self.call("POST", "/v1/control", t, b'{"action":"jump","video_id":"x; rm"}'), 400)
         self.assertEqual(self.call("POST", "/v1/control", t, b'{"action":"volume","level":"fort"}'), 400)
 
+    def test_remove_and_move_in_remote_queue(self) -> None:
+        ids = ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc", "ddddddddddd", "bbbbbbbbbbb"]
+        a = self.pear(queue=ids, selected=0, playing=True)
+        agent = Agent(authed(a), self.client("bureau"), "bureau")
+        agent.tick()
+        web = self.client("web")
+        # « à suivre » = b c d b ; déplacer d (rang 2) en tête (rang 0)
+        web.control("move", video_id="ddddddddddd", index=2, to=0)
+        agent.tick()
+        self.assertEqual(a.queue, ["aaaaaaaaaaa", "ddddddddddd", "bbbbbbbbbbb", "ccccccccccc", "bbbbbbbbbbb"])
+        # supprimer le second « b » (rang 3), pas le premier
+        web.control("remove", video_id="bbbbbbbbbbb", index=3)
+        agent.tick()
+        self.assertEqual(a.queue, ["aaaaaaaaaaa", "ddddddddddd", "bbbbbbbbbbb", "ccccccccccc"])
+        # rang périmé : on retombe sur la première occurrence après le titre en cours
+        web.control("remove", video_id="ccccccccccc", index=9)
+        agent.tick()
+        self.assertEqual(a.queue, ["aaaaaaaaaaa", "ddddddddddd", "bbbbbbbbbbb"])
+        self.assertEqual(a.current, "aaaaaaaaaaa")
+        st = web.snapshot()["devices"]["bureau"]["state"]
+        self.assertEqual([r["video_id"] for r in st["queue"]], ["ddddddddddd", "bbbbbbbbbbb"])
+        t = self.tokens["web"]
+        self.assertEqual(self.call("POST", "/v1/control", t, b'{"action":"move","video_id":"ddddddddddd"}'), 400)
+        self.assertEqual(self.call("POST", "/v1/control", t, b'{"action":"move","video_id":"ddddddddddd","to":-1}'), 400)
+        self.assertEqual(self.call("POST", "/v1/control", t, b'{"action":"remove","video_id":"ddddddddddd","index":"x"}'), 400)
+        self.assertEqual(self.call("POST", "/v1/control", t, b'{"action":"remove","video_id":"ddddddddddd","index":true}'), 400)
+
     def test_relay_client_event_stream(self) -> None:
         self.client("bureau").put_state("bureau", PlaybackState("abcdefghijk", 30, True))
         stream = self.client("web").events(timeout=5)

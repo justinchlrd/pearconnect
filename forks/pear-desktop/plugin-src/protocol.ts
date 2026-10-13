@@ -49,6 +49,10 @@ export type Command =
   | { type: 'volume'; level: number }
   | { type: 'jump'; video_id: string }
   | { type: 'enqueue'; video_id: string; next: boolean }
+  /** Retirer un titre « à suivre » (`index` : rang après le titre en cours, départage les doublons). */
+  | { type: 'remove'; video_id: string; index?: number }
+  /** Déplacer un titre « à suivre » au rang `to` (0 = juste après le titre en cours). */
+  | { type: 'move'; video_id: string; index?: number; to: number }
   | {
       type: 'resume';
       state: Partial<PlaybackState> & { video_id: string };
@@ -66,6 +70,8 @@ export type UiAction =
       level?: number;
       video_id?: string;
       next?: boolean;
+      index?: number;
+      to?: number;
     };
 
 export interface ActionResult {
@@ -209,4 +215,37 @@ export const indexOfVideo = (
   );
   const any = after ?? entries.find((e) => e.video_id === videoId);
   return any ? any.index : null;
+};
+
+const currentIndex = (entries: QueueEntry[]) =>
+  entries.find((e) => e.selected)?.index ?? -1;
+
+/**
+ * Index dans la file d'un titre « à suivre » : le rang `index` (compté après le titre en
+ * cours) s'il désigne bien ce titre, sinon sa première occurrence après le titre en cours.
+ * Null si le titre n'y est plus (file modifiée entre-temps).
+ */
+export const locateUpcoming = (
+  entries: QueueEntry[],
+  videoId: string,
+  index?: number | null,
+): number | null => {
+  const current = currentIndex(entries);
+  if (typeof index === 'number' && index >= 0) {
+    const candidate = current + 1 + Math.floor(index);
+    if (entries.some((e) => e.index === candidate && e.video_id === videoId))
+      return candidate;
+  }
+  const after = entries.find(
+    (e) => e.index > current && e.video_id === videoId,
+  );
+  return after ? after.index : null;
+};
+
+/** Index dans la file correspondant au rang `to` de « à suivre », borné à la file. */
+export const upcomingTarget = (entries: QueueEntry[], to: number): number => {
+  const current = currentIndex(entries);
+  const last = entries.length ? entries[entries.length - 1].index : current + 1;
+  const wanted = current + 1 + Math.max(0, Math.floor(Number(to) || 0));
+  return Math.max(current + 1, Math.min(last, wanted));
 };
