@@ -1,4 +1,4 @@
-From 8084d91cf6370042debb71ccd469f1517af99f07 Mon Sep 17 00:00:00 2001
+From efbefd08cc82c7fda319056fb6a668a584b8187a Mon Sep 17 00:00:00 2001
 From: Bridouche <bluenderbot@gmail.com>
 Date: Tue, 13 Oct 2026 11:27:54 +0200
 Subject: [PATCH 4/4] =?UTF-8?q?feat(pear-connect):=20=C3=A9dition=20=C3=A0?=
@@ -13,17 +13,17 @@ Content-Transfer-Encoding: 8bit
 - version du plugin (version.ts) affichée en tête du menu ; vérification de versions.json du
   serveur au démarrage puis toutes les 6 h ; « Rechercher une mise à jour… » avec commande copiable
 ---
- src/plugins/pear-connect/backend.ts  |  53 ++++++++++-
+ src/plugins/pear-connect/backend.ts  |  54 ++++++++++-
  src/plugins/pear-connect/client.ts   |  12 ++-
  src/plugins/pear-connect/menu.ts     |  69 +++++++++++++-
  src/plugins/pear-connect/protocol.ts |  89 ++++++++++++++++++
  src/plugins/pear-connect/renderer.ts | 132 ++++++++++++++++++++++-----
  src/plugins/pear-connect/version.ts  |   6 ++
- 6 files changed, 334 insertions(+), 27 deletions(-)
+ 6 files changed, 335 insertions(+), 27 deletions(-)
  create mode 100644 src/plugins/pear-connect/version.ts
 
 diff --git a/src/plugins/pear-connect/backend.ts b/src/plugins/pear-connect/backend.ts
-index 8565159..5cd8743 100644
+index 8565159..9b73579 100644
 --- a/src/plugins/pear-connect/backend.ts
 +++ b/src/plugins/pear-connect/backend.ts
 @@ -20,9 +20,12 @@ import {
@@ -75,7 +75,7 @@ index 8565159..5cd8743 100644
  
    async start(ctx) {
      this.ctx = ctx;
-@@ -158,8 +170,45 @@ export const backend = createBackend<Props, PearConnectConfig>({
+@@ -158,8 +170,46 @@ export const backend = createBackend<Props, PearConnectConfig>({
      this.publishLoop(abort.signal);
      this.commandLoop(abort.signal);
      this.eventsLoop(abort.signal);
@@ -102,7 +102,8 @@ index 8565159..5cd8743 100644
 +    try {
 +      const info = await client.versions();
 +      const update = pluginUpdate(info, PLUGIN_VERSION, process.platform);
-+      const changed = update?.latest !== this.update?.latest;
++      const changed =
++        this.update === undefined || update?.latest !== this.update?.latest;
 +      this.update = update;
 +      this.updateError = undefined;
 +      this.updateCheckedAt = Date.now();
@@ -122,7 +123,7 @@ index 8565159..5cd8743 100644
    },
  
    halt() {
-@@ -290,6 +339,8 @@ export const backend = createBackend<Props, PearConnectConfig>({
+@@ -290,6 +340,8 @@ export const backend = createBackend<Props, PearConnectConfig>({
        snapshot: this.snapshot ?? null,
        self: this.config?.device ?? '',
        status: this.status,

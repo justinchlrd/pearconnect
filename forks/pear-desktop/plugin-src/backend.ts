@@ -192,7 +192,8 @@ export const backend = createBackend<Props, PearConnectConfig>({
     try {
       const info = await client.versions();
       const update = pluginUpdate(info, PLUGIN_VERSION, process.platform);
-      const changed = update?.latest !== this.update?.latest;
+      const changed =
+        this.update === undefined || update?.latest !== this.update?.latest;
       this.update = update;
       this.updateError = undefined;
       this.updateCheckedAt = Date.now();

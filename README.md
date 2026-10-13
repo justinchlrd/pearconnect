@@ -11,6 +11,7 @@ Transfère le titre en cours, la position, la file et le mix d'origine entre ins
 - **Télécommande web** : `https://192.168.1.168:8443` (ou `http://…:8787`), avec volume et file « À suivre » cliquable, réordonnable (monter/descendre) et éditable (retirer).
 - **File distribuée** : depuis n'importe quel appareil (PC, téléphone en mode participant, télécommande), on peut sauter à un titre, le retirer ou le déplacer dans la file de l'appareil qui joue (`jump`/`remove`/`move`).
 - **Un seul appareil joue à la fois** : lancer la lecture ailleurs met l'ancien en pause.
+- **Mises à jour** : le serveur publie `versions.json` ; le plugin (menu Plugins › Pear Connect, première ligne « Version ») et l'appli Android (écran principal, notification) signalent quand une version plus récente est disponible et donnent la commande ou le lien d'installation.
 
 ### PC : installer ou mettre à jour le plugin
 

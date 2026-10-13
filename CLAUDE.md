@@ -39,8 +39,9 @@ Documents de fond : `RECHERCHE_PLAYBACK.md`, `RECHERCHE_MULTI_APPAREILS.md`, `RE
   - `remove`/`move` (v12) : `video_id` + `index` (rang dans « à suivre », 0 = juste après le titre en cours, départage les doublons) ; `move` ajoute `to` (rang final). Chaque appareil retombe sur la première occurrence du titre si le rang est périmé.
 - **Fichiers publics** servis depuis `/opt/pearconnect/dist/` :
   - `/install.ps1`, `/uninstall.ps1` (Windows) et `/install.sh`, `/uninstall.sh` (Linux, `curl … | bash`, gabarit `linux/install.sh.in`) ;
-  - `/dl/app-asar.zip`, `/dl/pearconnect-ca.crt`, `/dl/PearConnect.apk`.
-  - Générés par `windows/build_dist.py` dans `server/dist/`.
+  - `/dl/app-asar.zip`, `/dl/pearconnect-ca.crt`, `/dl/PearConnect.apk` ;
+  - `/versions.json` : versions publiées (`plugin.version`, `android.version_code/version_name/url`, commandes d'installation, SHA-256). Le plugin et l'appli le comparent à leur version pour signaler une mise à jour.
+  - Générés par `windows/build_dist.py` dans `server/dist/`. La version de l'APK vient de `build.gradle.kts` sauf 4e argument `<code>:<nom>` (quand l'APK servi est plus ancien que les sources : aujourd'hui `8:0.4.0`).
 - **Jetons** : un par appareil (`the-kernel`, `the_core`, `telephone`, `telecommande`).
   - Liste en clair chez l'utilisateur : `Documents\pearconnect\jetons.txt` sur the-kernel.
   - Ajout ou révocation : `connect_server.py --data-dir /var/lib/pearconnect add-device|remove-device <nom>` (pris en compte à chaud).
@@ -50,7 +51,7 @@ Documents de fond : `RECHERCHE_PLAYBACK.md`, `RECHERCHE_MULTI_APPAREILS.md`, `RE
 - **Source de référence** : `forks/pear-desktop/plugin-src/` (copiée dans le dépôt de build par `tools/build_asar.py`).
   - Dépôt de build : `../build/pear-desktop/` sur the_core (archive du tag `v3.12.0` + les 4 patches, `git init` local). L'ancien `/home/claude/pear-fork` du conteneur n'existe plus.
   - Commits exportés dans `forks/pear-desktop/*.patch` (4), à appliquer sur le tag `v3.12.0` de pear-devs/pear-desktop.
-  - **Tests unitaires** : `node --experimental-strip-types --test forks/pear-desktop/tests/protocol.test.ts` (18 tests, sans dépendance, Node ≥ 22.6).
+  - **Tests unitaires** : `node --experimental-strip-types --test forks/pear-desktop/tests/protocol.test.ts` (21 tests, sans dépendance, Node ≥ 22.6).
 - **Livraison** : seul `resources\app.asar` est remplacé, l'original est sauvegardé en `app.asar.original`.
   - L'asar est indépendant de la plateforme : construit sous Linux à partir de l'asar officiel 3.12.0 extrait, en remplaçant `dist/`.
 - **backend.ts** (processus principal, Node) :
@@ -65,7 +66,10 @@ Documents de fond : `RECHERCHE_PLAYBACK.md`, `RECHERCHE_MULTI_APPAREILS.md`, `RE
   - **Exécution** des commandes via l'API du lecteur `#movie_player` (`playVideo`/`pauseVideo`/`nextVideo`/`seekTo`/`setVolume`) ; `jump`/`remove`/`move` via le store de la file (`SET_INDEX`/`REMOVE_ITEM`/`MOVE_ITEM {fromIndex,toIndex}`, index final).
   - **Panneau « À suivre »** : boutons monter/descendre/retirer par ligne (v12).
   - **Reprise** : navigation interne `yt-navigate` + `watchEndpoint {videoId, playlistId, startTimeSeconds}`, sans redémarrer Pear. Ensuite, recalage de la position, puis remplacement des titres à venir par ceux de la source : `REMOVE_ITEM` + `/music/get_queue` + `ADD_ITEMS`.
-- **protocol.ts** : types et fonctions pures.
+- **protocol.ts** : types et fonctions pures (dont `isNewerVersion`, `pluginUpdate`).
+- **version.ts** : `PLUGIN_VERSION` (« 12 »), à incrémenter à chaque livraison ; lue par `build_dist.py`.
+- **menu.ts** : première ligne « Version : v12 (à jour) / — mise à jour vN disponible », sous-menu « Rechercher une mise à jour… » (boîte de dialogue, commande d'installation copiable selon la plateforme). Le menu lit l'état du backend (`backend.update`).
+- **Mise à jour** : `backend.checkUpdate()` 15 s après le démarrage puis toutes les 6 h ; toast dans la page une fois par version proposée ; journalisé.
 
 ### Appli Android « Pear Connect » — `android/`
 
@@ -79,8 +83,9 @@ Documents de fond : `RECHERCHE_PLAYBACK.md`, `RECHERCHE_MULTI_APPAREILS.md`, `RE
 - **Vue « Lecture sur … » dans YTM** : le compagnon répond `role: Participant` à l'opération `VIEW` quand un autre appareil joue (file, horloge, `playbackControl`). Les opérations PLAY/SKIP/SEEK/ADD/PLAY_NEXT/REMOVE/MOVE de YTM deviennent des `/v1/control` ; `END` correspond à « Quitter et lire ici ».
   - REMOVE/MOVE (0.5.0) : YTM désigne les lignes par les `id` de notre vue participant (`item`, `target`) → rangs de « à suivre ». Côté téléphone actif, `remove`/`move` du serveur deviennent des ops REMOVE/MOVE du pont avec `revision`, `lane` (0 file, 1 suggestions) et `item`/`target` ; le pont refuse un déplacement entre voies, on borne la cible dans la voie de départ ; une seconde tentative est faite si « Queue changed ». Sémantique de l'index final à vérifier sur appareil pour un déplacement vers le bas.
 - **Sélecteur d'appareils** : `DevicesActivity`, accessible depuis la notification, la tuile des réglages rapides `DevicesTile` et l'appli.
+- **Mise à jour** (0.5.0) : `Agent.checkUpdate` une fois par jour (`versions.json`, `Mapping.updateInfo` compare `version_code` à `BuildConfig.VERSION_CODE`) ; notification canal « update » une fois par version, qui ouvre l'URL de l'APK ; écran principal : ligne « Version x.y.z » et bouton « Rechercher une mise à jour ».
 - **Sécurité réseau** : `res/raw/pearconnect_ca.crt` comme ancre de confiance (`network_security_config`).
-- **Tests** : 17 tests JVM dans `MappingTest`. Sans Gradle : `javac` + junit 4.13.2 + hamcrest 1.3 + org.json 20240303 (jars Maven Central) suffisent pour `Mapping.java` + `MappingTest.java`.
+- **Tests** : 18 tests JVM dans `MappingTest`. Sans Gradle : `javac` + junit 4.13.2 + hamcrest 1.3 + org.json 20240303 (jars Maven Central) suffisent pour `Mapping.java` + `MappingTest.java`.
 
 ### Patch Morphe (facultatif, non testé sur appareil)
 
@@ -142,28 +147,28 @@ CLI `pearsync` (`status/pull/push/transfer/link/auth/agent`) et agent qui passe 
     - journal ;
     - panneau « À suivre » de l'appareil actif sur PC ;
     - erreurs TLS silencieuses côté serveur.
-13. **v12 (13/10, construite sur the_core, pas encore déployée sur le serveur)** :
+13. **v12 (13/10, déployée : serveur + dist à 11:52, the_core réinstallé par `install.ps1` sous PowerShell 5.1 à 11:55)** :
     - file distribuée : commandes `remove`/`move` (serveur, plugin, télécommande web, compagnon Android 0.5.0 en source) ;
     - tests unitaires du plugin (`protocol.ts`, 18) ; test serveur remove/move ; MappingTest 17 ;
     - installeur Linux (`install.sh`/`uninstall.sh`) servi par le serveur ;
     - chaîne de build Windows/Linux sans conteneur (`tools/build_asar.py`, `tools/deploy_*.sh`) ;
-    - dépôt git initialisé ; patches régénérés (4).
+    - dépôt git initialisé ; patches régénérés (4) ;
+    - version du plugin affichée en tête du menu ; vérification de mise à jour plugin + Android via `versions.json`.
     - Constat P0 : **the_core était resté en v10** (asar du 12/10 19:41 UTC, sans journal) ; v12 y a été installée à la main le 13/10 vers 11:25 (sauvegarde `app.asar.v10`).
 
 ## 5. Tâches restantes (priorisées)
 
 ### P0 — à valider sur le matériel réel (rien de ceci n'a été vérifié chez l'utilisateur)
-0. **Déployer la v12** (le classifieur de l'agent refuse de le faire lui-même : « Production Deploy ») :
-   - `bash tools/deploy_server.sh` (serveur + télécommande, compatible v10/v11 : les anciens clients ignorent remove/move) ;
-   - `bash tools/deploy_dist.sh` (installeurs + asar v12) puis `irm http://192.168.1.168:8787/install.ps1 | iex` sur **the-kernel** (toujours en v11 au mieux) ;
-   - construire et signer l'APK 0.5.0 sur la machine qui a le keystore (the-kernel, `Documents\pearconnect\android-signing`), le copier dans `server/dist/` et relancer `deploy_dist.sh`.
+0. **Finir le déploiement v12** (serveur, dist et the_core : faits le 13/10 ; l'utilisateur a autorisé explicitement le déploiement sur le Proxmox) :
+   - `irm http://192.168.1.168:8787/install.ps1 | iex` sur **the-kernel** (toujours en v11 au mieux ; son plugin v11 ne sait pas encore signaler les mises à jour) ;
+   - construire et signer l'APK 0.5.0 sur la machine qui a le keystore (the-kernel, `Documents\pearconnect\android-signing`), le copier dans `server/dist/`, relancer `python windows/build_dist.py … ` **sans** forcer `8:0.4.0`, puis `deploy_dist.sh` : le téléphone recevra alors la notification de mise à jour (une fois l'appli 0.5.0 installée… la 0.4.0 ne vérifie rien : première installation à la main).
 1. **Transfert de file v11 entre the-kernel et the_core.** L'utilisateur signalait « la file ne suit pas ». Diagnostic : the-kernel publiait un état `null` (rapport de la page absent), donc le transfert partait d'une session périmée. Vérifier :
    - que les deux PC ont réinstallé v11 (`/install.ps1` dans `journalctl -u pearconnect`) ;
    - `pear-connect.log` sur la cible ;
    - le snapshot (`/v1/snapshot`, jeton `telecommande`) : `devices.<pc>.state.upcoming` non vide.
 2. **Cause racine du rapport absent sur the-kernel** : `onPlayerApiReady` jamais appelé ? Le journal (lignes « page : … ») doit le dire.
 3. **Appli 0.4.0** : vue participant dans YTM, sélecteur d'appareils, tuile, reprise sur le téléphone avec et sans permission de superposition.
-4. **Installeur sous Windows PowerShell 5.1** : testé seulement sous pwsh 7 + shims. Points à surveiller : `irm | iex`, ConvertTo-Json et Remove-TypeData, élévation, ACL icacls sur `config.json`.
+4. ~~**Installeur sous Windows PowerShell 5.1**~~ : validé le 13/10 sur the_core (PS 5.1.26100, Pear dans `%LOCALAPPDATA%`, jeton repris du plugin, SHA-256 OK, Pear relancé). Reste à voir le cas Program Files + élévation sur the-kernel.
 
 ### P1
 5. **Révoquer la clé SSH `claude_pearconnect`** dans `/root/.ssh/authorized_keys` du Proxmox quand le travail est fini.
@@ -184,7 +189,10 @@ CLI `pearsync` (`status/pull/push/transfer/link/auth/agent`) et agent qui passe 
 13. **Mix au-delà de 50 titres** : YouTube régénère la suite, et chaque appareil peut diverger ensuite (seul l'appareil actif compte).
 
 ### P3
-14. Sélecteur d'appareils **dans** YTM Android : patch Morphe supplémentaire, ou fournisseur MediaRoute2 pour le sélecteur de sortie d'Android.
+14. **Patch Morphe « Pear Connect natif »** (demande du 13/10) : bouton de sélection d'appareil **dans** YTM Android, et **ne plus passer par Jam** (le mode participant monopolise la session Jam : impossible d'écouter ensemble avec des amis tout en transférant sa lecture). Pistes, par coût croissant :
+    - court terme sans patch : fournisseur `MediaRoute2ProviderService` dans l'appli compagnon → les appareils Connect apparaissent dans le sélecteur de sortie d'Android (icône « cast » de YTM et des réglages rapides) ; YTM n'est pas modifié, mais le transfert reste piloté par le compagnon ;
+    - patch Morphe « bouton Pear Connect » : réutiliser `JamUIInstaller`/`JamBar` (déjà des hooks sur la barre du lecteur) pour un bouton qui ouvre `DevicesActivity` via intent explicite ; faible coût, dépend du compagnon ;
+    - patch Morphe « Pear Connect sans Jam » : nouveau service compagnon (`IPearConnect`) ne touchant pas à `JamBridgeService`, avec son propre `SNAPSHOT`/`PLAY`/`SEEK` (réutiliser `YouTubeMusicBridge.QueueAccess`, `JamClock`, `JamPlayback`) et une barre « Lecture sur … » séparée de la barre Jam. C'est le vrai découplage ; la base Morphe (fork `forks/morphe-patches`, bundle composite) est déjà en place mais le patch 1.47 « contexte de lecture » n'a pas encore été testé sur l'appareil.
 15. Renommage côté UI Jam : YTM affiche « Écouter ensemble / connecté en Wi-Fi » en mode participant (chaînes du patch).
 
 ## 6. Pièges connus

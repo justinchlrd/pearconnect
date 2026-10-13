@@ -93,7 +93,8 @@ def main(asar_zip: str, ca: str, apk: str, apk_version: str | None = None) -> No
         },
         "published": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
     }
-    (DIST / "versions.json").write_text(json.dumps(versions, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    # write_bytes : fins de ligne LF même sous Windows
+    (DIST / "versions.json").write_bytes((json.dumps(versions, indent=1, ensure_ascii=False) + "\n").encode("utf-8"))
     for f in sorted(DIST.iterdir()):
         print(f"{f.name:22} {sha(f)[:16]}  {f.stat().st_size} o")
     print(f"plugin v{versions['plugin']['version']}, Android {name} ({code})")
